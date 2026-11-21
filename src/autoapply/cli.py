@@ -61,6 +61,21 @@ def _save_master(r: MasterResume) -> None:
         console.print(f"[yellow]{len(errors)} problem(s) remain — run `autoapply resume validate`.[/yellow]")
 
 
+def _keep_resume_file(file: Path) -> None:
+    """Keep a copy of the imported file: it's what gets uploaded to applications."""
+    dest = config.home() / f"resume{file.suffix.lower()}"
+    try:
+        if file.expanduser().resolve() != dest.resolve():
+            shutil.copy2(file.expanduser(), dest)
+    except OSError as e:
+        console.print(f"[yellow]Couldn't copy {esc(str(file))} for uploads: {esc(str(e))}[/yellow]")
+        return
+    cfg = config.load_config()
+    cfg.resume_file = str(dest)
+    config.save_config(cfg)
+    console.print(f"[dim]Applications will upload {esc(str(dest))}[/dim]")
+
+
 def _edit_then_save(r: MasterResume, llm: LLM | None, section: str | None = None) -> None:
     try:
         should_save = builder.edit(r, llm, section=section)
@@ -158,8 +173,12 @@ def resume_import(
     r = result.resume
     review.show(console, r, validate.validate(r), result.warnings, result.source_text if show_source else None)
 
-    if yes:
+    def save_both() -> None:
         _save_master(r)
+        _keep_resume_file(file)
+
+    if yes:
+        save_both()
         return
     action = questionary.select(
         "Does this look right?",
@@ -170,9 +189,10 @@ def resume_import(
         ],
     ).ask()
     if action == "save":
-        _save_master(r)
+        save_both()
     elif action == "edit":
         _edit_then_save(r, llm)
+        _keep_resume_file(file)
     else:
         console.print("Discarded.")
 
@@ -274,3 +294,7 @@ def usage() -> None:
 from . import cli_jobs  # noqa: E402
 
 cli_jobs.register(app)
+
+from . import cli_apply  # noqa: E402
+
+cli_apply.register(app)

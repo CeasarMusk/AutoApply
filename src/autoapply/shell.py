@@ -47,6 +47,8 @@ BANNER = r"""
 
 TIPS = [
     "Type `search` and pick ★ Jobs like my resume.",
+    "`use 12` then `apply`: the form gets filled, you review and click Submit.",
+    "`answers setup` answers the usual work-authorization and EEO questions once, up front.",
     "`search --last` repeats your last search without the menu.",
     "`use 12` selects job 12, then `info`, `open`, `save` act on it.",
     "`jobs --status saved` shows your shortlist.",
@@ -69,6 +71,7 @@ JOB_SHORTCUTS = {
     "save": ["job", "save"],
     "ignore": ["job", "ignore"],
     "reset": ["job", "reset"],
+    "apply": ["apply"],
 }
 
 HELP: list[tuple[str, list[tuple[str, str]]]] = [
@@ -81,9 +84,15 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
     ("Selected job", [
         ("use <id> / back", "Select / deselect a job"),
+        ("apply [id]", "Fill the application in a browser; you review and submit"),
+        ("apply [id] --dry-run", "Preview what would be filled, invisibly"),
         ("info [id]", "Details and description"),
         ("open [id]", "Open the posting in your browser"),
         ("save | ignore | reset [id]", "Shortlist / hide / clear"),
+    ]),
+    ("Answers", [
+        ("answers setup", "Answer the common questions up front (work auth, EEO…)"),
+        ("answers list | set <key> <value> | forget <key|#>", "See / change saved answers"),
     ]),
     ("Resume", [
         ("resume import <file.pdf>", "Turn your resume PDF into the master resume"),

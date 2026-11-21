@@ -86,6 +86,8 @@ class Config(BaseModel):
     use_remoteok: bool = True  # also search Remote OK's remote-jobs feed
     search: SearchDefaults = Field(default_factory=SearchDefaults)
     last_search: dict | None = None  # the last preset picked in the search menu
+    resume_file: str | None = None  # the resume file uploaded to applications (copied here on import)
+    ai_essays: bool = True  # draft answers to required open-ended questions with AI
 
 
 def load_config() -> Config:

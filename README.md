@@ -7,6 +7,7 @@ resumes and cover letters. You stay in the loop: the browser fills the form, you
 - [x] Master resume: import from PDF/DOCX/TXT, or build/edit step by step
 - [x] Interactive console (`autoapply` with no arguments)
 - [x] Job search: Greenhouse, Lever, Ashby public job boards
+- [x] Apply: fills Greenhouse / Lever / Ashby forms; you review and click Submit
 - [ ] Aggregator sources
 - [ ] Fit scoring
 - [ ] Tailoring + PDF rendering
@@ -58,6 +59,36 @@ and level). "Jobs like my resume" makes one AI call to build a search profile, c
 
 Jobs that disappear from a company's board are marked `closed` and hidden. The same role
 posted in several cities is shown once ("+2 more locations").
+
+## Applying
+
+```
+autoapply > use 91
+autoapply job(91:Scale AI) > apply
+```
+
+A browser window opens on the application and fills it in:
+- **Your resume**: name, email, phone, location, links, current company, school, and the resume file upload.
+- **Saved answers**: work authorization, sponsorship, "how did you hear", EEO/demographics, and every
+  question you've answered before. Common questions are recognized however they're worded.
+- **AI drafts** for required open-ended questions ("Why do you want to work here?"), using only facts
+  from your resume. They're marked "AI draft — review".
+- **You, once**: questions it has never seen are asked in the terminal and saved, so you won't be asked again.
+  Legal questions (work authorization, sponsorship, EEO) are never guessed.
+
+Then you review the form, fix anything (edits you make in the browser can be saved too), solve the CAPTCHA if
+there is one, and click **Submit** yourself. AutoApply never submits. Fields that still need you are
+outlined in orange.
+
+| Command | What it does |
+|---|---|
+| `apply [id]` | Fill the application (uses the selected job in the console) |
+| `apply [id] --dry-run` | Fill it in an invisible browser, show every answer + a screenshot, submit nothing |
+| `answers setup` | Answer the usual questions up front (work auth, sponsorship, EEO, how you heard…) |
+| `answers list` / `answers set <key> <value>` / `answers forget <key or #>` | Manage saved answers |
+
+First time only: `uv run playwright install chromium` (downloads the browser, ~125 MB).
+Browser sign-ins persist in `~/.autoapply/browser`.
 
 ## Resume commands
 | Command | What it does |
