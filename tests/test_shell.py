@@ -22,18 +22,16 @@ def two_jobs():
 
 
 def test_set_and_unset_persist(sh):
-    sh.handle("set KEYWORDS software engineer, backend")
-    sh.handle("set remote yes")
-    sh.handle("set MAX_AGE 30")
+    sh.handle("set starter no")
+    sh.handle("set MODEL sonnet")
     cfg = config.load_config()
-    assert cfg.search.keywords == ["software engineer", "backend"]
-    assert cfg.search.remote_only is True and cfg.search.max_age_days == 30
-    sh.handle("unset KEYWORDS")
-    assert config.load_config().search.keywords == []
+    assert cfg.use_starter_companies is False and cfg.claude_code_model == "sonnet"
+    sh.handle("unset STARTER")
+    assert config.load_config().use_starter_companies is True
 
 
 def test_set_rejects_bad_values(sh, capsys):
-    sh.handle("set REMOTE maybe")
+    sh.handle("set REMOTEOK maybe")
     sh.handle("set BACKEND gpt")
     sh.handle("set NOPE 1")
     out = capsys.readouterr().out
@@ -60,7 +58,7 @@ def test_use_injects_job_id(sh, two_jobs, capsys):
 def test_errors_keep_shell_alive(sh, capsys):
     assert sh.handle("bogus thing") is True
     assert sh.handle("search --nope") is True
-    assert sh.handle('set KEYWORDS "unclosed') is True
+    assert sh.handle('set MODEL "unclosed') is True
     assert sh.handle("info") is True  # no job selected: missing argument, not a crash
     out = capsys.readouterr().out
     assert "No such command" in out and "No such option" in out and "Missing argument" in out
@@ -81,5 +79,5 @@ def test_completer_knows_commands(sh):
 
     assert {"search", "jobs", "companies", "resume", "use", "set"} <= complete("")
     assert "add" in complete("companies ")
-    assert "KEYWORDS" in complete("set ")
+    assert "STARTER" in complete("set ")
     assert "--remote" in complete("search --")

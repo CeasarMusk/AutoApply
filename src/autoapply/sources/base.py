@@ -135,4 +135,6 @@ def looks_remote(*texts: str | None) -> bool:
 
 
 def pretty_slug(slug: str) -> str:
-    return re.sub(r"[-_]+", " ", slug).title()
+    from .starter import NAMES
+
+    return NAMES.get(slug) or re.sub(r"[-_]+", " ", slug).title()

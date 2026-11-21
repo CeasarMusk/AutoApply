@@ -25,44 +25,39 @@ uv run autoapply init
 - `api`: uses the Anthropic API (`export ANTHROPIC_API_KEY=...`), billed per token. Use this if you
   ever share the tool with other people.
 
-## Interactive console
+## Quick start
 
-Run `uv run autoapply` with no arguments:
-
-```
-autoapply > companies add stripe ramp palantir
-autoapply > set KEYWORDS software engineer, backend engineer
-autoapply > set EXCLUDE senior, staff, principal, manager
-autoapply > set LOCATION Remote, New York
+```bash
+uv sync
+uv run autoapply resume import ~/resume.pdf   # once: your PDF becomes the master resume
+uv run autoapply                              # opens the console
 autoapply > search
-autoapply > jobs
-autoapply > use 12
-autoapply job(12:Stripe) > info
-autoapply job(12:Stripe) > save
-autoapply job(12:Stripe) > back
 ```
 
-Tab completes commands and options; ↑ / Ctrl-R search history (`~/.autoapply/history`).
-Every command below also works directly from the shell: `uv run autoapply search`.
+`search` opens a menu:
+1. **What:** ★ Jobs like my resume, a field (Computer Science & Software ▸ Backend, Frontend,
+   Mobile, Security…, Data & AI ▸ …, IT & Support ▸ …, Product & Design ▸ …), or your own keywords.
+2. **Level:** Internship, New grad / Entry, Mid, Senior, Any.
+3. **Where:** Remote only, United States, Anywhere, or a city.
 
-| Console command | What it does |
-|---|---|
-| `help`, `help <command>` | All commands / one command's options |
-| `set <OPTION> <value>`, `unset <OPTION>`, `show options` | Saved settings: KEYWORDS, EXCLUDE, LOCATION, REMOTE, MAX_AGE, BACKEND, MODEL |
-| `show jobs\|companies\|resume\|usage` | Shortcuts |
-| `use <id>` / `back` | Select a job; `info`, `open`, `save`, `ignore`, `reset` then act on it |
-| `banner`, `history`, `clear`, `exit` | |
+It searches ~60 built-in tech companies (Greenhouse / Lever / Ashby boards) plus the Remote OK feed
+(about 16,000 open jobs, ~15 s), and ranks results by how well they match your resume (titles, skills
+and level). "Jobs like my resume" makes one AI call to build a search profile, cached until the resume changes.
 
-## Job commands
 | Command | What it does |
 |---|---|
-| `companies add <slug…>` | Add companies; detects whether each uses Greenhouse, Lever or Ashby. The slug is in the company's job-board URL |
-| `companies list` / `companies remove <slug>` | Manage the list |
-| `search [keywords…] [-l LOC] [--remote] [-x WORD] [--max-age N]` | Fetch all boards, save jobs matching your filters (flags override saved options) |
-| `jobs [-s STATUS] [-c COMPANY] [-g TEXT] [--remote] [--all] [-n N]` | List saved jobs |
-| `job show <id> [--full]` | Details and description |
-| `job open <id>` | Open the posting in your browser |
-| `job save\|ignore\|reset <id…>` | Shortlist / hide / clear |
+| `search` | Menu search (above) |
+| `search --last` | Repeat the last search |
+| `search "data engineer" --level entry -l US` | Search without the menu |
+| `jobs [-s saved] [-g text] [--remote] [--all]` | Saved jobs, best match first |
+| `use <id>` → `info` / `open` / `save` / `ignore`, `back` | Work with one job |
+| `profile [--refresh]` | What your resume says to search for |
+| `companies add <slug>` | Add a company beyond the built-in list |
+| `set STARTER false` / `set REMOTEOK false` | Turn off the built-in list / Remote OK |
+| `help`, `exit` | |
+
+Jobs that disappear from a company's board are marked `closed` and hidden. The same role
+posted in several cities is shown once ("+2 more locations").
 
 ## Resume commands
 | Command | What it does |

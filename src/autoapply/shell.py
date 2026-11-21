@@ -46,22 +46,18 @@ BANNER = r"""
 """
 
 TIPS = [
-    "Use `set KEYWORDS software engineer, backend` then `search` with no arguments.",
+    "Type `search` and pick ★ Jobs like my resume.",
+    "`search --last` repeats your last search without the menu.",
     "`use 12` selects job 12, then `info`, `open`, `save` act on it.",
-    "`companies add stripe ramp palantir` detects each company's job board automatically.",
-    "`set EXCLUDE senior, staff, principal, manager` filters out roles above your level.",
-    "Press Tab to complete commands, and ↑ to search your command history.",
-    "`resume edit experience` jumps straight to that section.",
     "`jobs --status saved` shows your shortlist.",
+    "`profile` shows what AutoApply thinks you're looking for, based on your resume.",
+    "Press Tab to complete commands, and ↑ to search your command history.",
 ]
 
 # name -> (config path, kind, description)
 OPTIONS: dict[str, tuple[str, str, str]] = {
-    "KEYWORDS": ("search.keywords", "list", "Title keywords/phrases to match (comma-separated)"),
-    "EXCLUDE": ("search.exclude", "list", "Drop titles containing these words (comma-separated)"),
-    "LOCATION": ("search.locations", "list", "Locations to match; 'Remote' matches remote jobs"),
-    "REMOTE": ("search.remote_only", "bool", "Only remote jobs (true/false)"),
-    "MAX_AGE": ("search.max_age_days", "int", "Only jobs posted within N days"),
+    "STARTER": ("use_starter_companies", "bool", "Search the built-in list of ~60 tech companies"),
+    "REMOTEOK": ("use_remoteok", "bool", "Also search Remote OK's remote-jobs feed"),
     "BACKEND": ("llm_backend", "choice:claude-code,api", "AI backend: claude-code (subscription) or api"),
     "MODEL": ("claude_code_model", "str", "Claude Code model alias (opus, sonnet, haiku)"),
 }
@@ -76,38 +72,28 @@ JOB_SHORTCUTS = {
 }
 
 HELP: list[tuple[str, list[tuple[str, str]]]] = [
-    ("Core", [
-        ("help, ?", "Show this help (append a command for its options: `search --help`)"),
-        ("banner", "Show the banner and status"),
-        ("set <OPTION> <value>", "Set a search/AI option (saved to config)"),
-        ("unset <OPTION>", "Clear an option"),
-        ("show options|jobs|companies|resume|usage", "Show things"),
-        ("history", "Recent commands"),
-        ("clear", "Clear the screen"),
-        ("exit, quit", "Leave the console"),
+    ("Search", [
+        ("search", "Pick what to look for from a menu (★ jobs like my resume, a field, or keywords)"),
+        ("search --last", "Repeat the last search"),
+        ("search <keywords> [--level entry] [-l Austin] [--remote]", "Search without the menu"),
+        ("jobs [-s saved] [-g text] [--remote]", "List saved jobs, best match first"),
+        ("profile [--refresh]", "What your resume says you should search for"),
+    ]),
+    ("Selected job", [
+        ("use <id> / back", "Select / deselect a job"),
+        ("info [id]", "Details and description"),
+        ("open [id]", "Open the posting in your browser"),
+        ("save | ignore | reset [id]", "Shortlist / hide / clear"),
     ]),
     ("Resume", [
-        ("resume import <file>", "Read your PDF/DOCX/TXT resume into the master resume"),
-        ("resume build", "Build a master resume step by step"),
-        ("resume edit [section]", "Edit the master resume"),
-        ("resume show | validate", "View / check the master resume"),
+        ("resume import <file.pdf>", "Turn your resume PDF into the master resume"),
+        ("resume show", "View the master resume"),
     ]),
-    ("Jobs", [
-        ("companies add <slug…>", "Add companies (auto-detects Greenhouse/Lever/Ashby)"),
-        ("companies list | remove <slug>", "Manage companies"),
-        ("search [keywords…]", "Fetch jobs and save matches (uses your options)"),
-        ("jobs [--status s] [-g text]", "List saved jobs"),
-        ("use <id>", "Select a job"),
-        ("back", "Deselect the job"),
-    ]),
-    ("Selected job (or pass an id)", [
-        ("info [id]", "Job details and description"),
-        ("open [id]", "Open the posting in your browser"),
-        ("save [id] | ignore [id] | reset [id]", "Shortlist / hide / clear"),
-    ]),
-    ("Other", [
-        ("init", "First-time setup"),
-        ("usage", "Claude token usage per task"),
+    ("More", [
+        ("companies add <slug…> | list | remove", "Extra companies beyond the built-in list"),
+        ("set <OPTION> <value> | unset | show options", "Settings: STARTER, REMOTEOK, BACKEND, MODEL"),
+        ("usage", "Claude token usage"),
+        ("banner, history, clear, help <command>, exit", ""),
     ]),
 ]
 
@@ -155,7 +141,7 @@ class Shell:
         tree.update({
             "set": opts,
             "unset": opts,
-            "show": {k: None for k in ["options", "jobs", "companies", "resume", "usage"]},
+            "show": {k: None for k in ["options", "jobs", "companies", "resume", "usage", "profile"]},
             "use": None, "back": None, "help": None, "?": None, "banner": None,
             "history": None, "clear": None, "exit": None, "quit": None,
             **{k: None for k in JOB_SHORTCUTS},
@@ -251,7 +237,7 @@ class Shell:
         except Exception:
             resume = "[red]unreadable — run `resume validate`[/red]"
         with db.session() as s:
-            total = s.exec(select(func.count()).select_from(Job).where(Job.status != "ignored")).one()
+            total = s.exec(select(func.count()).select_from(Job).where(Job.status.not_in(["ignored", "closed"]))).one()
             new = s.exec(select(func.count()).select_from(Job).where(Job.status == "new")).one()
             saved = s.exec(select(func.count()).select_from(Job).where(Job.status == "saved")).one()
         if cfg.llm_backend == "claude-code":
@@ -260,11 +246,13 @@ class Shell:
                 ai += " [red]— `claude` not found[/red]"
         else:
             ai = f"Anthropic API ({cfg.model})"
-        n_companies = len(cfg.companies.pairs())
+        from . import sources
+
+        n_companies = len(sources.search_targets(cfg))
         lines = [
             f"       =[ [bold]autoapply v{VERSION}[/bold]",
             f"+ -- --=[ resume: {resume}",
-            f"+ -- --=[ {n_companies} companies · {total} jobs · [green]{new} new[/green] · [yellow]{saved} saved[/yellow]",
+            f"+ -- --=[ {n_companies} job boards · {total} jobs saved · [green]{new} new[/green] · [yellow]{saved} shortlisted[/yellow]",
             f"+ -- --=[ AI: {ai}",
         ]
         for l in lines:
@@ -408,10 +396,10 @@ class Shell:
             self.dispatch(["companies", "list"])
         elif what == "resume":
             self.dispatch(["resume", "show"])
-        elif what == "usage":
-            self.dispatch(["usage"])
+        elif what in ("usage", "profile"):
+            self.dispatch([what])
         else:
-            console.print("Usage: show options|jobs|companies|resume|usage")
+            console.print("Usage: show options|jobs|companies|resume|profile|usage")
 
 
 def run_shell(app: typer.Typer) -> None:

@@ -128,9 +128,11 @@ class Job(SQLModel, table=True):
     description: str = ""
     posted_at: datetime | None = None
     dedupe_key: str = SQLField(index=True, unique=True)
-    # new / seen / saved / ignored / applied
+    # new / seen / saved / ignored / applied / closed (no longer posted)
     status: str = "new"
-    fit_score: int | None = None
+    match_score: int | None = None  # local resume-similarity score, 0-100
+    matched_skills: str | None = None
+    fit_score: int | None = None  # AI fit score (later)
     fit_reasons: str | None = None
     dealbreakers: str | None = None
     found_at: datetime = SQLField(default_factory=_now)

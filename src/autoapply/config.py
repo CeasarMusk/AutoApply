@@ -82,7 +82,10 @@ class Config(BaseModel):
     claude_code_model: str = "opus"
     model: str = DEFAULT_MODEL  # API model id, used when llm_backend is "api"
     companies: Companies = Field(default_factory=Companies)
+    use_starter_companies: bool = True  # also search the built-in list of ~60 tech companies
+    use_remoteok: bool = True  # also search Remote OK's remote-jobs feed
     search: SearchDefaults = Field(default_factory=SearchDefaults)
+    last_search: dict | None = None  # the last preset picked in the search menu
 
 
 def load_config() -> Config:
