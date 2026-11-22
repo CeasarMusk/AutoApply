@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from .answers import match_option
+from .answers import match_option, to_iso_date
 from .scan import Field, _open_options
 
 
@@ -48,6 +48,14 @@ def fill(page, f: Field, value) -> None:
             loc.fill(iso if native else f"{iso[5:7]}/{iso[8:10]}/{iso[:4]}", timeout=5_000)
             if not native:
                 loc.press("Tab")  # close the calendar; never Enter, which could submit the form
+        elif f.kind == "monthyear":
+            iso = to_iso_date(value)
+            if not iso:
+                raise FillError(f"'{value}' isn't a date")
+            _, month = _loc(page, f, 0)
+            _, year = _loc(page, f, 1)
+            _select_index(month, MONTH_JS, int(iso[5:7]), "month")
+            _select_index(year, YEAR_JS, iso[:4], "year")
         elif f.kind == "combobox" and not f.options and _is_place(f):
             _type_place(frame, loc, str(value))  # location search boxes (e.g. Ashby): options appear as you type
         elif f.kind == "combobox":
@@ -78,6 +86,21 @@ def fill(page, f: Field, value) -> None:
         raise
     except Exception as e:
         raise FillError(str(e).splitlines()[0][:160]) from e
+
+
+MONTH_JS = r"""(el, m) => {
+  const names = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+  return Array.from(el.options).findIndex(o => o.value !== '' &&
+    (names.indexOf(o.text.trim().toLowerCase().slice(0, 3)) + 1 === m || Number(o.value) === m && !/[a-z]/i.test(o.text)));
+}"""
+YEAR_JS = "(el, y) => Array.from(el.options).findIndex(o => o.text.trim() === y)"
+
+
+def _select_index(loc, js: str, want, what: str) -> None:
+    idx = loc.evaluate(js, want)
+    if idx is None or idx < 0:
+        raise FillError(f"no {what} option for {want}")
+    loc.select_option(index=idx, timeout=5_000)
 
 
 def _combobox_pick(frame, loc, value: str) -> None:

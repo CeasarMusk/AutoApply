@@ -23,9 +23,11 @@ STANDARD: list[tuple[str, str, str]] = [
     ("preferred_name", "Preferred first name", r"preferred (first )?name"),
     ("first_name", "First name", r"^(legal )?first name|given name"),
     ("last_name", "Last name", r"^(legal )?last name|family name|surname"),
-    ("full_name", "Full name", r"^(full |legal )?name$|^your name$|^full name"),
+    ("full_name", "Full name", r"^(full |legal |full legal )?name$|^your name$|^full (legal )?name"),
     ("email", "Email", r"\be ?mail\b"),
     ("phone", "Phone", r"\bphone\b|mobile number"),
+    ("whatsapp_consent", "Do you consent to receiving WhatsApp messages?", r"whatsapp"),
+    ("sms_consent", "Do you consent to receiving SMS / text messages?", r"\bsms\b|text messag"),
     ("linkedin", "LinkedIn URL", r"linkedin"),
     ("github", "GitHub URL", r"github"),
     ("portfolio", "Website / portfolio URL", r"portfolio|personal (web)?site|^website|other website"),
@@ -40,6 +42,8 @@ STANDARD: list[tuple[str, str, str]] = [
     ("age_18", "Are you at least 18 years old?", r"(at least|over|older than) (the age of )?18|18 years"),
     ("how_heard", "How did you hear about this job?", r"how did you (hear|find|learn)|where did you (hear|find|learn)|referral source|how were you referred"),
     ("salary", "Salary expectation", r"salary|compensation (expectation|requirement)|expected (pay|compensation)|desired (pay|compensation)"),
+    ("edu_start", "Education start date", r"^education( history)? start date"),
+    ("edu_end", "Education end date", r"^education( history)? end date"),
     ("start_date", "When can you start?", r"start date|when (can|could) you start|earliest (start|availability)|notice period|available to start"),
     ("relocate", "Are you willing to relocate?", r"relocat"),
     ("current_company", "Current company", r"current (company|employer)|most recent (company|employer)|^company$"),
@@ -67,6 +71,9 @@ STANDARD: list[tuple[str, str, str]] = [
 SENSITIVE = {"authorized", "authorized_no_sponsorship", "sponsorship", "age_18", "transgender", "sexual_orientation", "gender", "hispanic",
              "race", "veteran", "disability", "salary"}
 
+# Optional questions that are still worth asking once (otherwise optional unknowns are left blank).
+ASK_IF_OPTIONAL = {"sms_consent", "whatsapp_consent"}
+
 DECLINE_RE = re.compile(r"decline|prefer not|not wish|don.?t wish|choose not|rather not|not to (say|disclose|answer|identify)|i don.?t want", re.I)
 YES = {"yes", "y", "true", "i am", "i do"}
 NO = {"no", "n", "false", "i am not", "i do not"}
@@ -84,7 +91,7 @@ def normalize(text: str) -> str:
 # Keys answered with a plain fact (name, city, school…) only match short, form-style labels;
 # a long question that merely mentions "location" or "company" is something else.
 FACT_KEYS = {"preferred_name", "first_name", "last_name", "full_name", "email", "phone", "linkedin", "github",
-             "portfolio", "current_company", "current_title", "school", "degree", "discipline", "grad_date",
+             "portfolio", "current_company", "current_title", "school", "degree", "discipline", "grad_date", "edu_start", "edu_end",
              "country", "city", "state", "zip", "location"}
 
 
@@ -333,4 +340,7 @@ class ResumeFacts:
                 v["discipline"] = ed.field
             if ed.end:
                 v["grad_date"] = ed.end
+                v["edu_end"] = ed.end
+            if ed.start:
+                v["edu_start"] = ed.start
         return cls(v)

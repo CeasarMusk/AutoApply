@@ -210,7 +210,7 @@ def apply(
     try:
         result = runner.run(job, resume, resume_file, dry_run=dry_run, headless=headless,
                             use_ai=cfg.ai_essays and not no_ai, screenshot=shot,
-                            transcript_file=runner.saved_transcript(cfg))
+                            transcript_file=runner.saved_transcript(cfg), ask_optional=cfg.ask_optional)
     except Exception as e:
         msg = str(e).splitlines()[0]
         if "Executable doesn't exist" in msg or "playwright install" in msg:

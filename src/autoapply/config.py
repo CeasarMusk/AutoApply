@@ -91,6 +91,7 @@ class Config(BaseModel):
     transcript_file: str | None = None  # uploaded when a form asks for a transcript (copied here on import)
     tailor_resume: bool = True  # upload a resume tailored to each job (falls back to resume_file)
     ai_essays: bool = True  # draft answers to required open-ended questions with AI
+    ask_optional: bool = True  # ask about optional questions it can't answer (False: leave them blank)
 
 
 def keep_document(src: Path, stem: str) -> Path:

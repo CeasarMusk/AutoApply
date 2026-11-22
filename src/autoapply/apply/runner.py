@@ -26,7 +26,7 @@ from .. import config, db
 from ..llm import LLMError
 from ..models import Application, Job, MasterResume
 from . import essay, fill, scan
-from .answers import SENSITIVE, AnswerStore, ResumeFacts, describe, match_option, normalize, standard_key, to_iso_date
+from .answers import ASK_IF_OPTIONAL, SENSITIVE, AnswerStore, ResumeFacts, describe, match_option, normalize, standard_key, to_iso_date
 
 console = Console()
 SKIP = "↷ Skip — I'll answer it in the browser"
@@ -92,8 +92,9 @@ def saved_transcript(cfg: config.Config | None = None) -> Path | None:
 class Applier:
     def __init__(self, job: Job, resume: MasterResume | None, resume_file: Path, *, interactive: bool = True,
                  use_ai: bool = True, store: AnswerStore | None = None, llm=None,
-                 transcript_file: Path | None = None):
+                 transcript_file: Path | None = None, ask_optional: bool = True):
         self.job = job
+        self.ask_optional = ask_optional  # also ask about optional questions with no known answer
         self.resume = resume
         self.resume_file = resume_file
         self.transcript_file = transcript_file
@@ -111,7 +112,7 @@ class Applier:
         """Convert a saved/known answer into something this field accepts, or None."""
         if value is None or value == "":
             return None
-        if f.kind == "date":
+        if f.kind in ("date", "monthyear"):
             return to_iso_date(value)
         if f.kind in ("select", "combobox", "radio", "yesno"):
             if not f.options:
@@ -141,11 +142,11 @@ class Applier:
             if TRANSCRIPT_RE.search(where):
                 if self.transcript_file:
                     return Planned(f, str(self.transcript_file), "file", key="transcript")
-                return Planned(f, None, "ask" if f.required else "skip", key="transcript",
+                return Planned(f, None, self._unknown(f), key="transcript",
                                note="no transcript saved yet (`resume transcript <file>`)")
             if re.search(r"resume|\bcv\b", where):
                 return Planned(f, str(self.resume_file), "file")
-            return Planned(f, None, "ask" if f.required else "skip", note="file upload")
+            return Planned(f, None, self._unknown(f), note="file upload")
         note = ""
         hit = self.store.lookup(f.label)
         if hit:
@@ -160,8 +161,13 @@ class Applier:
             if fitted is not None:
                 return Planned(f, fitted, "resume", key=key)
         if f.is_essay and not key:
-            return Planned(f, None, "essay" if f.required else "skip", note=note)
-        return Planned(f, None, "ask" if f.required else "skip", key=key, note=note)
+            # AI drafts only required essays; optional ones are yours to answer or skip.
+            return Planned(f, None, "essay" if f.required else self._unknown(f), note=note)
+        return Planned(f, None, self._unknown(f, key), key=key, note=note)
+
+    def _unknown(self, f: scan.Field, key: str | None = None) -> str:
+        """What to do with a question we have no answer for: ask you, or leave it blank."""
+        return "ask" if f.required or self.ask_optional or key in ASK_IF_OPTIONAL else "skip"
 
     def plan(self, fields: list[scan.Field], current: dict | None = None) -> list[Planned]:
         """Plan every field. Fields that already have a value on the page (filled on an earlier
@@ -216,9 +222,11 @@ class Applier:
         for p in todo:
             value = self._prompt(p)
             if value is None:
+                if not p.field.required:
+                    p.source = "skip"  # you chose to leave it blank
                 continue
             p.value, p.source = value, "you"
-            if p.field.kind == "date":
+            if p.field.kind in ("date", "monthyear"):
                 p.value = to_iso_date(value) or value
             if p.field.kind == "file":
                 if p.key == "transcript" and Path(value).expanduser().is_file():
@@ -317,7 +325,8 @@ class Applier:
             label, style = self.SOURCE_STYLE.get(p.source, (p.source, ""))
             if p.source == "file" and p.key == "transcript":
                 label = "saved transcript"
-            if p.source in ("ask", "essay") and not p.field.required:
+            if p.source in ("ask", "essay") and not p.field.required and not self.ask_optional \
+                    and p.key not in ASK_IF_OPTIONAL:
                 continue
             val = p.value
             if p.field.kind == "file" and val:
@@ -353,7 +362,7 @@ class Applier:
                     continue
                 now_val = now
             before = p.filled
-            if f.kind == "date" and to_iso_date(now_val) == before:
+            if f.kind in ("date", "monthyear") and to_iso_date(now_val) == before:
                 continue  # same date, just shown in the site's format
             b = normalize(", ".join(before)) if isinstance(before, list) else normalize(str(before or ""))
             n = normalize(", ".join(now_val)) if isinstance(now_val, list) else normalize(str(now_val))
@@ -403,14 +412,14 @@ def _install_capture(page, captured: dict) -> None:
 
 def run(job: Job, resume: MasterResume | None, resume_file: Path, *, headless: bool = False,
         dry_run: bool = False, use_ai: bool = True, screenshot: Path | None = None,
-        transcript_file: Path | None = None) -> Result:
+        transcript_file: Path | None = None, ask_optional: bool = True) -> Result:
     from playwright.sync_api import sync_playwright
 
     url = form_url(job)
     if url is None:
         raise RuntimeError(f"Auto-fill supports Greenhouse, Lever and Ashby; this job is from {job.source}.")
     app = Applier(job, resume, resume_file, interactive=not dry_run, use_ai=use_ai,
-                  transcript_file=transcript_file)
+                  transcript_file=transcript_file, ask_optional=ask_optional)
     result = Result(url=url)
     profile_dir = config.home() / "browser"
     profile_dir.mkdir(parents=True, exist_ok=True)

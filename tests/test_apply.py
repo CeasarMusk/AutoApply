@@ -30,6 +30,13 @@ from .conftest import sample_resume
     ("Current location", "location"),
     ("LinkedIn Profile", "linkedin"),
     ("Website or GitHub", "github"),
+    ("Full Legal Name", "full_name"),
+    ("SMS", "sms_consent"),
+    ("Do you consent to receive text messages about your application?", "sms_consent"),
+    ("WhatsApp", "whatsapp_consent"),
+    ("Education History: Start Date", "edu_start"),
+    ("Education History: End Date", "edu_end"),
+    ("Earliest start date", "start_date"),
     # long questions that merely mention a fact word are not that fact
     ("Do you acknowledge that this is a hybrid role and you will come to our location four days a week?", None),
     ("Tell us about a product initiative you led that improved user engagement", None),
@@ -79,7 +86,7 @@ def _job():
 
 def test_plan_sources(tmp_path):
     st = AnswerStore({"standard": {"authorized": "Yes", "gender": "Decline to self-identify"}})
-    app = Applier(_job(), sample_resume(), tmp_path / "r.pdf", interactive=False, store=st)
+    app = Applier(_job(), sample_resume(), tmp_path / "r.pdf", interactive=False, store=st, ask_optional=False)
     F = scan.Field
     plans = app.plan([
         F("a1", "text", "First Name", True),
@@ -101,6 +108,36 @@ def test_plan_sources(tmp_path):
     assert got["a7"][0] == "skip" and got["a8"][0] == "skip"
 
 
+def test_optional_questions_are_asked_by_default(tmp_path):
+    F = scan.Field
+    app = Applier(_job(), sample_resume(), tmp_path / "r.pdf", interactive=False, store=AnswerStore({}))
+    assert app.plan_field(F("a", "text", "Nickname", False)).source == "ask"
+    assert app.plan_field(F("b", "textarea", "Anything else?", False)).source == "ask"  # not AI-drafted
+    assert app.plan_field(F("c", "file", "Cover letter", False, id="cover_letter")).source == "ask"
+    assert app.plan_field(F("d", "text", "Pronouns", False)).source == "ask"
+
+
+def test_optional_consent_is_asked_then_reused(tmp_path):
+    F = scan.Field
+    opts = ["Yes - I consent to receiving SMS text messages", "No - I do not consent to receiving SMS text messages"]
+    app = Applier(_job(), sample_resume(), tmp_path / "r.pdf", interactive=False, store=AnswerStore({}), ask_optional=False)
+    assert app.plan_field(F("s", "radio", "SMS", False, options=opts)).source == "ask"  # optional, but asked once
+    st = AnswerStore({"standard": {"sms_consent": opts[1]}})
+    app = Applier(_job(), sample_resume(), tmp_path / "r.pdf", interactive=False, store=st)
+    assert app.plan_field(F("s", "yesno", "Can we text you (SMS)?", False, options=["Yes", "No"])).value == "No"
+
+
+def test_education_dates_from_resume(tmp_path):
+    from autoapply.models import Education
+
+    r = sample_resume()
+    r.education = [Education(school="UT Austin", start="Aug 2023", end="May 2027")]
+    app = Applier(_job(), r, tmp_path / "r.pdf", interactive=False, store=AnswerStore({}))
+    F = scan.Field
+    assert app.plan_field(F("a", "monthyear", "Education History: Start Date", False)).value == "2023-08-01"
+    assert app.plan_field(F("b", "monthyear", "Education History: End Date", False)).value == "2027-05-01"
+
+
 def test_saved_answer_not_in_options_is_asked(tmp_path):
     st = AnswerStore({"standard": {"how_heard": "A friend"}})
     app = Applier(_job(), None, tmp_path / "r.pdf", interactive=False, store=st)
@@ -116,7 +153,9 @@ def test_transcript_upload(tmp_path):
                      transcript_file=tmp_path / "t.pdf")
     assert [(p.source, p.value) for p in with_t.plan(fields)] == [("file", str(tmp_path / "t.pdf"))] * 2
     without = Applier(_job(), None, tmp_path / "r.pdf", interactive=False, store=AnswerStore({}))
-    assert [p.source for p in without.plan(fields)] == ["ask", "skip"]
+    assert [p.source for p in without.plan(fields)] == ["ask", "ask"]  # optional asked by default
+    quiet = Applier(_job(), None, tmp_path / "r.pdf", interactive=False, store=AnswerStore({}), ask_optional=False)
+    assert [p.source for p in quiet.plan(fields)] == ["ask", "skip"]
 
 
 def test_keep_transcript_replaces_old_copy(tmp_path, monkeypatch):
@@ -269,6 +308,42 @@ def test_scan_ashby_unnamed_inputs_dates_and_checkbox_groups(browser):
     assert page.locator("input[placeholder='Pick date...']").input_value() == "05/01/2027"
     fill.fill(page, deg, ["Undergraduate/Bachelors"])
     assert page.locator("#q1_dt-labeled-checkbox-0").is_checked()
+    page.close()
+
+
+# Ashby (Ramp): education Start/End Date as Month + Year selects with a label on the wrapper;
+# SMS / WhatsApp consent radios.
+_MONTHS = "".join(f'<option value="{i}">{m}</option>' for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"], 1))
+_YEARS = "".join(f'<option value="{y}">{y}</option>' for y in range(2027, 2000, -1))
+_MY = (f'<div><select><option disabled hidden value="">Month...</option>{_MONTHS}</select></div>'
+       f'<div><select><option disabled hidden value="">Year...</option>{_YEARS}</select></div>')
+ASHBY_RAMP_LIKE = f"""
+<form>
+ <div data-field-path="_systemfield_education_history"><label for="_systemfield_education_history">Education History</label>
+   <div><label for="eh-degree">Degree</label><input id="eh-degree" type="text"></div>
+   <div><label for="eh-startDate">Start Date</label><div id="eh-startDate">{_MY}</div></div>
+   <div><label for="eh-endDate">End Date</label><div id="eh-endDate">{_MY}</div></div></div>
+ <ul><li><p class="_consentRadioGroupItemLabel_q1pga_28">SMS</p><div>
+   <label><input type="radio" name="smsConsent" value="given"><div><p><strong>Yes</strong> - I consent to receiving SMS text messages</p></div></label>
+   <label><input type="radio" name="smsConsent" value="notGiven"><div><p><strong>No</strong> - I do not consent to receiving SMS text messages</p></div></label>
+ </div></li></ul>
+</form>"""
+
+
+def test_scan_and_fill_month_year_selects_and_consent(browser):
+    page, fields = _scan(browser, ASHBY_RAMP_LIKE)
+    start, end = fields["Education History: Start Date"], fields["Education History: End Date"]
+    assert start.kind == end.kind == "monthyear"
+    assert fields["Degree"].kind == "text"  # plain fields keep their own label
+    sms = fields["SMS"]
+    assert sms.kind == "radio" and sms.options[1].startswith("No - I do not consent")
+    fill.fill(page, start, "2023-08-01")
+    fill.fill(page, end, "May 2027")
+    fill.fill(page, sms, "No")
+    vals = scan.read_values(page)
+    assert vals[start.aa] == "August 2023" and vals[end.aa] == "May 2027"
+    assert vals[sms.aa] == ["No - I do not consent to receiving SMS text messages"]
     page.close()
 
 

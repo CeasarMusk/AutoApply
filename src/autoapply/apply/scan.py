@@ -13,7 +13,7 @@ import httpx
 
 from ..sources.base import USER_AGENT
 
-KINDS = ("text", "textarea", "select", "combobox", "date", "radio", "checkboxes", "checkbox", "yesno", "file")
+KINDS = ("text", "textarea", "select", "combobox", "date", "monthyear", "radio", "checkboxes", "checkbox", "yesno", "file")
 
 
 @dataclass
@@ -121,7 +121,24 @@ SCAN_JS = r"""
   const all = Array.from(document.querySelectorAll('input, textarea, select')).filter(isControl);
   const groups = new Map();
 
+  // Month + Year dropdown pairs (Ashby education Start/End Date): one question, two selects.
+  const optTexts = s => Array.from(s.options).map(o => o.text.trim());
+  const isMonthSel = s => s.tagName === 'SELECT' &&
+    optTexts(s).filter(t => /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(t)).length >= 12;
+  const isYearSel = s => s.tagName === 'SELECT' && optTexts(s).filter(t => /^\d{4}$/.test(t)).length >= 5;
+  const pairs = [], paired = new Set();
+  for (const m of all.filter(isMonthSel)) {
+    let node = m.parentElement;
+    for (let i = 0; i < 3 && node; i++, node = node.parentElement) {
+      const sels = Array.from(node.querySelectorAll('select')).filter(isControl);
+      if (sels.length > 2) break;
+      const y = sels.find(s => s !== m && !paired.has(s) && isYearSel(s));
+      if (y) { pairs.push([m, y]); paired.add(m); paired.add(y); break; }
+    }
+  }
+
   for (const el of all) {
+    if (paired.has(el)) continue;
     const t = (el.type || '').toLowerCase();
     // Ashby names each checkbox of a multi-select after its option; its id says which question it belongs to.
     const groupKey = (el.id && /-labeled-(checkbox|radio)-\d+$/.test(el.id)) ? el.id.replace(/-labeled-(checkbox|radio)-\d+$/, '') : el.name;
@@ -144,6 +161,26 @@ SCAN_JS = r"""
                 name: el.name || null, id: el.id || null, options: [], multiple: !!el.multiple };
     if (kind === 'select') f.options = Array.from(el.options).filter(o => o.value !== '' && !/^select/i.test(o.text.trim())).map(o => clean(o.text));
     fields.push(f);
+  }
+
+  for (const [m, y] of pairs) {
+    if (!isVisible(m) && !isVisible(y) && !isVisible(m.parentElement)) continue;
+    const id = prefix + (n++);
+    mark(m, id, 0); mark(y, id, 1);
+    // The label usually points at the wrapper around both selects (label[for=wrapper id]).
+    let raw = '', labEl = null;
+    for (let node = m.parentElement, i = 0; i < 5 && node && !raw; i++, node = node.parentElement) {
+      if (node.id) { const l = document.querySelector(`label[for="${CSS.escape(node.id)}"]`); if (l) { labEl = l; raw = textWithout(l); } }
+    }
+    if (!clean(raw)) { lastLabelEl = null; raw = containerLabel(m, [m, y]); labEl = lastLabelEl; }
+    let label = firstLine(raw);
+    // "Start Date" inside "Education History" -> "Education History: Start Date" (not "when can you start").
+    const entry = m.closest('[data-field-path], fieldset');
+    const head = entry && entry.querySelector('label, legend, [class*=question-title]');
+    const section = head ? firstLine(textWithout(head)) : '';
+    if (section && label && section !== label && !label.toLowerCase().includes(section.toLowerCase())) label = section + ': ' + label;
+    fields.push({ aa: id, kind: 'monthyear', label, required: !!(m.required || reqMark(raw) || labelRequired(labEl)),
+                  name: m.name || null, id: (labEl && labEl.htmlFor) || null, options: [], multiple: false });
   }
 
   for (const [name, members] of groups) {
@@ -187,12 +224,16 @@ SCAN_JS = r"""
 
 READ_JS = r"""
 () => {
-  const out = {};
+  const out = {}, monthYear = {};
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
   for (const el of document.querySelectorAll('[data-aa]')) {
     const id = el.getAttribute('data-aa');
     const opt = el.getAttribute('data-aa-opt');
     const t = (el.type || '').toLowerCase();
+    if (opt !== null && el.tagName === 'SELECT') {  // month/year pair -> "March 2023"
+      (monthYear[id] = monthYear[id] || ['', ''])[+opt] = el.value !== '' ? clean(el.options[el.selectedIndex].text) : '';
+      continue;
+    }
     if (opt !== null) {
       const on = el.tagName === 'BUTTON' ? (el.getAttribute('aria-pressed') === 'true' || /active|selected/i.test(el.className))
                                          : el.checked;
@@ -219,6 +260,7 @@ READ_JS = r"""
     }
     if (!(id in out)) out[id] = el.value || '';
   }
+  for (const [id, parts] of Object.entries(monthYear)) out[id] = parts.filter(Boolean).join(' ');
   return out;
 }
 """

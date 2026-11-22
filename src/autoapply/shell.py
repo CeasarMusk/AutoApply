@@ -63,6 +63,7 @@ OPTIONS: dict[str, tuple[str, str, str]] = {
     "BACKEND": ("llm_backend", "choice:claude-code,api", "AI backend: claude-code (subscription) or api"),
     "MODEL": ("claude_code_model", "str", "Claude Code model alias (opus, sonnet, haiku)"),
     "TAILOR": ("tailor_resume", "bool", "Tailor your resume to each job when applying"),
+    "OPTIONAL": ("ask_optional", "bool", "Ask about optional questions too (off: leave unknown ones blank)"),
 }
 
 # Commands that act on a job id; with a job selected via `use`, the id can be omitted.
