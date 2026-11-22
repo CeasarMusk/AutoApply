@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .answers import match_option
 from .scan import Field, _open_options
 
@@ -38,6 +40,16 @@ def fill(page, f: Field, value) -> None:
             if idx is None:
                 raise FillError(f"'{value}' isn't one of the options")
             loc.select_option(label=f.options[idx], timeout=5_000)
+        elif f.kind == "date":
+            iso = str(value)
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", iso):
+                raise FillError(f"'{value}' isn't a date")
+            native = (loc.get_attribute("type") or "") == "date"
+            loc.fill(iso if native else f"{iso[5:7]}/{iso[8:10]}/{iso[:4]}", timeout=5_000)
+            if not native:
+                loc.press("Tab")  # close the calendar; never Enter, which could submit the form
+        elif f.kind == "combobox" and not f.options and _is_place(f):
+            _type_place(frame, loc, str(value))  # location search boxes (e.g. Ashby): options appear as you type
         elif f.kind == "combobox":
             for v in _as_list(value):
                 _combobox_pick(frame, loc, v)

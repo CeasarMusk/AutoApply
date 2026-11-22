@@ -26,7 +26,7 @@ from .. import config, db
 from ..llm import LLMError
 from ..models import Application, Job, MasterResume
 from . import essay, fill, scan
-from .answers import SENSITIVE, AnswerStore, ResumeFacts, describe, match_option, normalize, standard_key
+from .answers import SENSITIVE, AnswerStore, ResumeFacts, describe, match_option, normalize, standard_key, to_iso_date
 
 console = Console()
 SKIP = "↷ Skip — I'll answer it in the browser"
@@ -53,7 +53,7 @@ def form_url(job: Job) -> str | None:
 class Planned:
     field: scan.Field
     value: object = None
-    source: str = "skip"  # saved | similar | resume | file | ai | you | skip | ask | essay | failed
+    source: str = "skip"  # saved | similar | resume | file | ai | you | page | skip | ask | essay | failed
     key: str | None = None
     note: str = ""
     filled: object = None  # what we actually put in
@@ -102,6 +102,8 @@ class Applier:
         self.store = store or AnswerStore.load()
         self.facts = ResumeFacts.from_resume(resume)
         self.llm = llm
+        self.drafts: dict[str, str] = {}  # question -> AI draft, so a re-scan doesn't draft it again
+        self.filled_before: dict[str, object] = {}  # question -> what we filled on an earlier scan
 
     # -- planning ------------------------------------------------------------
 
@@ -109,6 +111,8 @@ class Applier:
         """Convert a saved/known answer into something this field accepts, or None."""
         if value is None or value == "":
             return None
+        if f.kind == "date":
+            return to_iso_date(value)
         if f.kind in ("select", "combobox", "radio", "yesno"):
             if not f.options:
                 return str(value) if f.kind == "combobox" else None
@@ -159,8 +163,21 @@ class Applier:
             return Planned(f, None, "essay" if f.required else "skip", note=note)
         return Planned(f, None, "ask" if f.required else "skip", key=key, note=note)
 
-    def plan(self, fields: list[scan.Field]) -> list[Planned]:
-        return [self.plan_field(f) for f in fields]
+    def plan(self, fields: list[scan.Field], current: dict | None = None) -> list[Planned]:
+        """Plan every field. Fields that already have a value on the page (filled on an earlier
+        scan, or by you in the browser) are left alone."""
+        plans = []
+        for f in fields:
+            now = (current or {}).get(f.aa)
+            if isinstance(now, list):
+                now = [x for x in now if x] or None
+            if now and f.kind != "file":
+                p = Planned(f, now, "page")
+                p.filled = self.filled_before.get(f.label)  # so edits you made in the browser can still be saved
+                plans.append(p)
+            else:
+                plans.append(self.plan_field(f))
+        return plans
 
     # -- asking --------------------------------------------------------------
 
@@ -201,6 +218,8 @@ class Applier:
             if value is None:
                 continue
             p.value, p.source = value, "you"
+            if p.field.kind == "date":
+                p.value = to_iso_date(value) or value
             if p.field.kind == "file":
                 if p.key == "transcript" and Path(value).expanduser().is_file():
                     self.transcript_file = keep_transcript(Path(value))
@@ -219,10 +238,14 @@ class Applier:
                 p.source = "ask"
             return
         for p in todo:
+            if p.field.label in self.drafts:
+                p.value, p.source = self.drafts[p.field.label], "ai"
+                continue
             try:
                 with console.status(f"Drafting an answer: {p.field.label[:60]}…"):
                     p.value = essay.draft(p.field.label, self.job, self.resume, self.llm)
                 p.source = "ai"
+                self.drafts[p.field.label] = p.value
             except LLMError as e:
                 p.source, p.note = "ask", f"AI draft failed: {e}"
 
@@ -237,22 +260,49 @@ class Applier:
             for p in group:
                 if p.value is None:
                     continue
+                if p.source == "page":
+                    continue
                 try:
                     fill.fill(page, p.field, p.value)
                     p.filled = p.value
+                    self.filled_before[p.field.label] = p.value
                 except fill.FillError as e:
                     p.note = f"couldn't fill: {e}"
                     p.source = "failed"
             if group is files and any(p.filled for p in files):
                 fill.wait_until_idle(page)
+        self._refill_cleared(page, plans)
         fill.highlight(page, [p.field for p in plans if p.needs_user or p.source == "failed"])
+
+    def _refill_cleared(self, page, plans: list[Planned]) -> None:
+        """Some boards finish reading the uploaded resume late and blank out fields we already filled
+        (seen on Ashby with School). Read the form back and fill anything that came back empty."""
+        page.wait_for_timeout(1000)
+        for attempt in range(2):
+            try:
+                now = scan.read_values(page)
+            except Exception:
+                return
+            def empty(v) -> bool:
+                return not ([x for x in v if x] if isinstance(v, list) else v)
+
+            cleared = [p for p in plans if p.filled is not None and p.source != "page"
+                       and p.field.kind != "file" and empty(now.get(p.field.aa))]
+            if not cleared:
+                return
+            for p in cleared:
+                try:
+                    fill.fill(page, p.field, p.value)
+                except fill.FillError as e:
+                    p.note, p.source = f"couldn't fill: {e}", "failed"
+            page.wait_for_timeout(800)
 
     # -- reporting / learning --------------------------------------------------
 
     SOURCE_STYLE = {
         "saved": ("saved", "green"), "similar": ("similar question — check", "yellow"),
         "resume": ("resume", "green"), "file": ("resume file", "green"), "ai": ("AI draft — review", "cyan"),
-        "you": ("you (saved)", "green"), "skip": ("left blank", "dim"), "ask": ("YOU, in the browser", "bold yellow"),
+        "you": ("you (saved)", "green"), "page": ("already on the form", "dim"), "skip": ("left blank", "dim"), "ask": ("YOU, in the browser", "bold yellow"),
         "essay": ("YOU, in the browser", "bold yellow"), "failed": ("YOU, in the browser", "bold red"),
     }
 
@@ -303,6 +353,8 @@ class Applier:
                     continue
                 now_val = now
             before = p.filled
+            if f.kind == "date" and to_iso_date(now_val) == before:
+                continue  # same date, just shown in the site's format
             b = normalize(", ".join(before)) if isinstance(before, list) else normalize(str(before or ""))
             n = normalize(", ".join(now_val)) if isinstance(now_val, list) else normalize(str(now_val))
             # a site expanding what we typed ("Austin, TX" -> "Austin, TX, USA") isn't the user's edit
@@ -389,7 +441,7 @@ def run(job: Job, resume: MasterResume | None, resume_file: Path, *, headless: b
                 if not fields:
                     console.print("[yellow]No form fields found on this page. If there's an Apply button, click it, "
                                   "then choose “Re-scan”.[/yellow]")
-                plans = app.plan(fields)
+                plans = app.plan(fields, scan.read_values(page))
                 app.draft_essays(plans)
                 app.ask_unknowns(plans)
                 with console.status("Filling in the form…"):

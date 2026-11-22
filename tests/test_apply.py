@@ -240,3 +240,59 @@ def test_scan_and_fill_ashby_like(browser):
     fill.fill(page, yn, "Yes")
     assert page.locator("button", has_text="Yes").get_attribute("aria-pressed") == "true"
     page.close()
+
+
+# Shapes copied from a real Ashby form (Notion): inputs without id/name, a date picker, and
+# multi-select checkboxes that each get their own `name`.
+ASHBY_NOTION_LIKE = """
+<form>
+ <div class="ashby-application-form-field-entry"><label for="_systemfield_location">Current Location</label>
+   <div><input placeholder="Start typing..." role="combobox" aria-autocomplete="list" value=""><button type="button">v</button></div></div>
+ <div class="ashby-application-form-field-entry"><label for="gd">Graduation Date</label>
+   <div class="react-datepicker-wrapper"><input type="text" placeholder="Pick date..." class="ashby-application-form-input-date" required></div></div>
+ <div class="ashby-application-form-field-entry"><label class="title">Degree Type</label>
+   <div><input type="checkbox" name="Bachelors" id="q1_dt-labeled-checkbox-0"><label for="q1_dt-labeled-checkbox-0">Undergraduate/Bachelors</label></div>
+   <div><input type="checkbox" name="Masters" id="q1_dt-labeled-checkbox-1"><label for="q1_dt-labeled-checkbox-1">Master's</label></div></div>
+ <div class="ashby-application-form-field-entry"><label for="li">LinkedIn Profile</label><input id="li" name="li" type="text"></div>
+</form>"""
+
+
+def test_scan_ashby_unnamed_inputs_dates_and_checkbox_groups(browser):
+    page, fields = _scan(browser, ASHBY_NOTION_LIKE)
+    assert fields["Current Location"].kind == "combobox"
+    date = fields["Graduation Date"]
+    assert date.kind == "date" and date.required
+    deg = fields["Degree Type"]
+    assert deg.kind == "checkboxes" and deg.options == ["Undergraduate/Bachelors", "Master's"]
+    assert "Undergraduate/Bachelors" not in fields  # options aren't separate questions any more
+    fill.fill(page, date, "2027-05-01")
+    assert page.locator("input[placeholder='Pick date...']").input_value() == "05/01/2027"
+    fill.fill(page, deg, ["Undergraduate/Bachelors"])
+    assert page.locator("#q1_dt-labeled-checkbox-0").is_checked()
+    page.close()
+
+
+def test_to_iso_date_and_degree_matching():
+    from autoapply.apply.answers import to_iso_date
+
+    assert to_iso_date("Spring 2027") == "2027-05-01"
+    assert to_iso_date("May 2027") == "2027-05-01"
+    assert to_iso_date("2027-12") == "2027-12-01"
+    assert to_iso_date("12/15/2026") == "2026-12-15"
+    assert to_iso_date("soon") is None
+    assert match_option("Bachelor's Degree", ["Undergraduate/Bachelors", "Master's", "PhD", "MBA"]) == 0
+    assert match_option("BS", ["High school", "Bachelor of Science (BS)", "MS"]) == 1
+
+
+def test_rescan_keeps_page_values_and_reuses_drafts(tmp_path):
+    app = Applier(_job(), sample_resume(), tmp_path / "r.pdf", interactive=False, store=AnswerStore({}))
+    F = scan.Field
+    essay_f = F("e", "textarea", "Why us?", True)
+    name_f = F("n", "text", "First Name", True)
+    plans = app.plan([essay_f, name_f], {"e": "my edited answer", "n": ""})
+    assert (plans[0].source, plans[0].value) == ("page", "my edited answer")  # not re-drafted or overwritten
+    assert plans[1].source == "resume"
+    app.drafts["Why us?"] = "earlier draft"
+    p = app.plan([essay_f], {"e": ""})
+    app.draft_essays(p)
+    assert (p[0].source, p[0].value) == ("ai", "earlier draft")  # no second AI call

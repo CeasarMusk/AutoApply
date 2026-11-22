@@ -124,6 +124,53 @@ def _canon(s: str) -> str:
     return SYNONYMS.get(n, n)
 
 
+MONTH_NUM = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+SEASON_MONTH = {"spring": 5, "summer": 8, "fall": 12, "autumn": 12, "winter": 12}
+
+
+def to_iso_date(value) -> str | None:
+    """Turn a saved date answer ("Spring 2027", "May 2027", "2027-05", "05/2027") into YYYY-MM-DD."""
+    s = str(value or "").strip().lower()
+    if m := re.fullmatch(r"(\d{4})-(\d{1,2})(?:-(\d{1,2}))?", s):
+        y, mo, d = int(m[1]), int(m[2]), int(m[3] or 1)
+    elif m := re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", s):
+        y, mo, d = int(m[3]), int(m[1]), int(m[2])
+    elif m := re.fullmatch(r"(\d{1,2})/(\d{4})", s):
+        y, mo, d = int(m[2]), int(m[1]), 1
+    elif m := re.fullmatch(r"([a-z]+)\.?,? (\d{4})", s):
+        word = m[1]
+        mo = SEASON_MONTH.get(word) or MONTH_NUM.get(word[:3])
+        if not mo:
+            return None
+        y, d = int(m[2]), 1
+    elif m := re.fullmatch(r"(\d{4})", s):
+        y, mo, d = int(m[1]), 5, 1
+    else:
+        return None
+    if not (1 <= mo <= 12 and 1 <= d <= 31 and 1900 < y < 2100):
+        return None
+    return f"{y:04d}-{mo:02d}-{d:02d}"
+
+
+DEGREE_LEVELS = [
+    ("mba", r"\bmba\b|business administration"),
+    ("phd", r"\bph ?d\b|doctor"),
+    ("master", r"master|\bm ?s\b|\bmsc\b|\bm ?eng\b|graduate degree"),
+    ("bachelor", r"bachelor|undergrad|\bb ?s\b|\bb ?a\b|\bbsc\b|\bb ?eng\b"),
+    ("associate", r"associate"),
+    ("high_school", r"high school|\bged\b|secondary"),
+]
+
+
+def degree_level(s: str) -> str | None:
+    n = normalize(s)
+    for level, pat in DEGREE_LEVELS:
+        if re.search(pat, n):
+            return level
+    return None
+
+
 def match_option(answer: str, options: list[str]) -> int | None:
     """Index of the option that best matches a saved answer, or None."""
     if not options or answer is None:
@@ -132,6 +179,12 @@ def match_option(answer: str, options: list[str]) -> int | None:
     canon = [_canon(o) for o in options]
     if a in canon:
         return canon.index(a)
+    # "Bachelor's Degree" vs "Undergraduate/Bachelors", "BS", "Bachelor of Science"...
+    level = degree_level(str(answer))
+    if level:
+        hits = [i for i, o in enumerate(options) if degree_level(o) == level]
+        if len(hits) == 1:
+            return hits[0]
     if a in YES or a in NO:
         want = "yes" if a in YES else "no"
         for i, o in enumerate(canon):

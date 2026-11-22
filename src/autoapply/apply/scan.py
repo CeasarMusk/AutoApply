@@ -13,7 +13,7 @@ import httpx
 
 from ..sources.base import USER_AGENT
 
-KINDS = ("text", "textarea", "select", "combobox", "radio", "checkboxes", "checkbox", "yesno", "file")
+KINDS = ("text", "textarea", "select", "combobox", "date", "radio", "checkboxes", "checkbox", "yesno", "file")
 
 
 @dataclass
@@ -69,7 +69,7 @@ SCAN_JS = r"""
     const t = (c.type || '').toLowerCase();
     if (['hidden', 'submit', 'button', 'image', 'reset', 'search'].includes(t)) return false;
     if (/recaptcha|captcha/i.test((c.name || '') + (c.id || '') + (c.className || ''))) return false;
-    if (!c.id && !c.name && t !== 'file') return false;
+    if (c.getAttribute('aria-hidden') === 'true') return false;
     return true;
   };
   const GENERIC = /^(attach|upload|browse|choose file|select|select\.\.\.|drop files here|enter manually|dropbox|google drive)$/i;
@@ -123,9 +123,11 @@ SCAN_JS = r"""
 
   for (const el of all) {
     const t = (el.type || '').toLowerCase();
-    if ((t === 'radio' || t === 'checkbox') && el.name) {
-      if (!groups.has(el.name)) groups.set(el.name, []);
-      groups.get(el.name).push(el);
+    // Ashby names each checkbox of a multi-select after its option; its id says which question it belongs to.
+    const groupKey = (el.id && /-labeled-(checkbox|radio)-\d+$/.test(el.id)) ? el.id.replace(/-labeled-(checkbox|radio)-\d+$/, '') : el.name;
+    if ((t === 'radio' || t === 'checkbox') && groupKey) {
+      if (!groups.has(groupKey)) groups.set(groupKey, []);
+      groups.get(groupKey).push(el);
       continue;
     }
     if (t === 'checkbox') { groups.set('__single_' + (n++), [el]); continue; }
@@ -136,6 +138,8 @@ SCAN_JS = r"""
     const raw = labelFor(el);
     let kind = el.tagName === 'TEXTAREA' ? 'textarea' : el.tagName === 'SELECT' ? 'select' : t === 'file' ? 'file' : 'text';
     if (el.getAttribute('role') === 'combobox') kind = 'combobox';
+    if (t === 'date' || (kind === 'text' && (/date/i.test(el.className || '') || el.closest('.react-datepicker-wrapper') ||
+        /^(pick (a )?date|mm\/dd\/yyyy|dd\/mm\/yyyy|yyyy-mm-dd)/i.test(el.placeholder || '')))) kind = 'date';
     const f = { aa: id, kind, label: firstLine(raw), required: !!(el.required || el.getAttribute('aria-required') === 'true' || reqMark(raw) || labelRequired(lastLabelEl)),
                 name: el.name || null, id: el.id || null, options: [], multiple: !!el.multiple };
     if (kind === 'select') f.options = Array.from(el.options).filter(o => o.value !== '' && !/^select/i.test(o.text.trim())).map(o => clean(o.text));
