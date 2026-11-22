@@ -10,8 +10,7 @@ resumes and cover letters. You stay in the loop: the browser fills the form, you
 - [x] Apply: fills Greenhouse / Lever / Ashby forms; you review and click Submit
 - [ ] Aggregator sources
 - [ ] Fit scoring
-- [ ] Tailoring + PDF rendering
-- [ ] Form filling (Playwright)
+- [x] Tailoring: one-page PDF resume per job, with preview
 
 ## Setup
 ```bash
@@ -84,10 +83,20 @@ outlined in orange.
 |---|---|
 | `apply [id]` | Fill the application (uses the selected job in the console) |
 | `apply [id] --dry-run` | Fill it in an invisible browser, show every answer + a screenshot, submit nothing |
+| `apply [id] --no-tailor` | Upload your original resume instead of a tailored one |
+| `tailor [id] [--preview] [--redo]` | Make a one-page resume tailored to the job; `--preview` opens the PDF |
 | `answers setup` | Answer the usual questions up front (work auth, sponsorship, EEO, how you heard…) |
 | `answers list` / `answers set <key> <value>` / `answers forget <key or #>` | Manage saved answers |
 
 First time only: `uv run playwright install chromium` (downloads the browser, ~125 MB).
+**Tailored resumes.** Before filling a form, Claude picks and orders the experience, projects,
+bullets and skills from your master resume that fit the job, and may reword bullets and the
+summary in the job's language. A guard rejects any rewrite that adds a number, tool or name
+not already in your master resume (your original wording is kept instead), and the layout
+tightens or drops the lowest-priority lines to fit one page. You then choose: use it, preview
+it, tailor again, or upload your original. Each job's PDF is saved in
+`~/.autoapply/out/<id>-<company>/` and reused next time. Turn it off with `set TAILOR false`.
+
 Browser sign-ins persist in `~/.autoapply/browser`.
 
 ## Resume commands
@@ -97,10 +106,11 @@ Browser sign-ins persist in `~/.autoapply/browser`.
 | `autoapply resume build` | Step-by-step wizard (with optional AI bullet suggestions) |
 | `autoapply resume edit [section]` | Menu editor: add/edit/reorder/delete items and bullets |
 | `autoapply resume show` | Print it with problems highlighted |
+| `autoapply resume transcript file.pdf` | Save a transcript; it's uploaded when a form asks for one |
 | `autoapply resume validate` | Check after hand-editing the YAML |
 | `autoapply usage` | Token usage per task |
 
-Every item gets a stable id (`exp2`, `exp2.b3`, …). Tailoring will select items by id, so
+Every item gets a stable id (`exp2`, `exp2.b3`, …). Tailoring selects items by id, so
 it can't invent experience you don't have. Put *more* in the master than fits on a page.
 
 Data lives in `~/.autoapply` (override with `AUTOAPPLY_HOME`).

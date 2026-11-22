@@ -70,12 +70,33 @@ class Result:
     url: str = ""
 
 
+TRANSCRIPT_RE = re.compile(r"transcript|academic record|grade report|record of grades", re.I)
+
+
+def keep_transcript(src: Path) -> Path:
+    """Copy a transcript into the AutoApply home and remember it for future applications."""
+    dest = config.keep_document(src, "transcript")
+    cfg = config.load_config()
+    cfg.transcript_file = str(dest)
+    config.save_config(cfg)
+    return dest
+
+
+def saved_transcript(cfg: config.Config | None = None) -> Path | None:
+    cfg = cfg or config.load_config()
+    if cfg.transcript_file and Path(cfg.transcript_file).is_file():
+        return Path(cfg.transcript_file)
+    return None
+
+
 class Applier:
     def __init__(self, job: Job, resume: MasterResume | None, resume_file: Path, *, interactive: bool = True,
-                 use_ai: bool = True, store: AnswerStore | None = None, llm=None):
+                 use_ai: bool = True, store: AnswerStore | None = None, llm=None,
+                 transcript_file: Path | None = None):
         self.job = job
         self.resume = resume
         self.resume_file = resume_file
+        self.transcript_file = transcript_file
         self.interactive = interactive
         self.use_ai = use_ai
         self.store = store or AnswerStore.load()
@@ -113,6 +134,11 @@ class Applier:
     def plan_field(self, f: scan.Field) -> Planned:
         where = f"{f.label} {f.id or ''} {f.name or ''}".lower()
         if f.kind == "file":
+            if TRANSCRIPT_RE.search(where):
+                if self.transcript_file:
+                    return Planned(f, str(self.transcript_file), "file", key="transcript")
+                return Planned(f, None, "ask" if f.required else "skip", key="transcript",
+                               note="no transcript saved yet (`resume transcript <file>`)")
             if re.search(r"resume|\bcv\b", where):
                 return Planned(f, str(self.resume_file), "file")
             return Planned(f, None, "ask" if f.required else "skip", note="file upload")
@@ -175,7 +201,12 @@ class Applier:
             if value is None:
                 continue
             p.value, p.source = value, "you"
-            if p.field.kind != "file":
+            if p.field.kind == "file":
+                if p.key == "transcript" and Path(value).expanduser().is_file():
+                    self.transcript_file = keep_transcript(Path(value))
+                    p.value = str(self.transcript_file)
+                    console.print(f"[dim]Saved as your transcript; it'll be uploaded automatically from now on.[/dim]")
+            else:
                 p.key = self.store.remember(p.field.label, value)
         self.store.save()
 
@@ -234,6 +265,8 @@ class Applier:
             if p.source == "skip" and not p.field.required:
                 continue
             label, style = self.SOURCE_STYLE.get(p.source, (p.source, ""))
+            if p.source == "file" and p.key == "transcript":
+                label = "saved transcript"
             if p.source in ("ask", "essay") and not p.field.required:
                 continue
             val = p.value
@@ -317,13 +350,15 @@ def _install_capture(page, captured: dict) -> None:
 
 
 def run(job: Job, resume: MasterResume | None, resume_file: Path, *, headless: bool = False,
-        dry_run: bool = False, use_ai: bool = True, screenshot: Path | None = None) -> Result:
+        dry_run: bool = False, use_ai: bool = True, screenshot: Path | None = None,
+        transcript_file: Path | None = None) -> Result:
     from playwright.sync_api import sync_playwright
 
     url = form_url(job)
     if url is None:
         raise RuntimeError(f"Auto-fill supports Greenhouse, Lever and Ashby; this job is from {job.source}.")
-    app = Applier(job, resume, resume_file, interactive=not dry_run, use_ai=use_ai)
+    app = Applier(job, resume, resume_file, interactive=not dry_run, use_ai=use_ai,
+                  transcript_file=transcript_file)
     result = Result(url=url)
     profile_dir = config.home() / "browser"
     profile_dir.mkdir(parents=True, exist_ok=True)

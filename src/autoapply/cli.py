@@ -238,6 +238,44 @@ def resume_show() -> None:
     review.show(console, r, validate.validate(r))
 
 
+TRANSCRIPT_TYPES = {".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg"}
+
+
+@resume_app.command("transcript")
+def resume_transcript(
+    file: Path = typer.Argument(None, help="Your transcript (PDF recommended). Omit to see the current one."),
+    remove: bool = typer.Option(False, "--remove", help="Forget the saved transcript."),
+) -> None:
+    """Save your transcript so it's uploaded whenever an application asks for one."""
+    from .apply.runner import keep_transcript, saved_transcript
+
+    current = saved_transcript()
+    if remove:
+        cfg = config.load_config()
+        cfg.transcript_file = None
+        config.save_config(cfg)
+        if current and current.parent == config.home():
+            current.unlink(missing_ok=True)
+        console.print("Transcript removed." if current else "No transcript was saved.")
+        return
+    if file is None:
+        if current:
+            console.print(f"Applications upload [bold]{esc(str(current))}[/bold] when they ask for a transcript.")
+        else:
+            console.print("No transcript saved. Run `resume transcript <file.pdf>`.")
+        return
+    file = file.expanduser()
+    if not file.is_file():
+        _fail(f"No such file: {file}")
+    if file.suffix.lower() not in TRANSCRIPT_TYPES:
+        _fail(f"Use a {', '.join(sorted(TRANSCRIPT_TYPES))} file; application forms won't accept {file.suffix or 'that'}.")
+    try:
+        dest = keep_transcript(file)
+    except OSError as e:
+        _fail(f"Couldn't copy {file}: {e}")
+    console.print(f"[green]Saved[/green] {esc(str(dest))}. It'll be uploaded whenever a form asks for a transcript.")
+
+
 @resume_app.command("validate")
 def resume_validate() -> None:
     """Check the master resume for missing or malformed fields (also after hand edits)."""

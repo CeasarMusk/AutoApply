@@ -7,6 +7,7 @@ Everything personal (resume, answers, database, generated documents) lives under
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Literal
 
@@ -87,7 +88,22 @@ class Config(BaseModel):
     search: SearchDefaults = Field(default_factory=SearchDefaults)
     last_search: dict | None = None  # the last preset picked in the search menu
     resume_file: str | None = None  # the resume file uploaded to applications (copied here on import)
+    transcript_file: str | None = None  # uploaded when a form asks for a transcript (copied here on import)
+    tailor_resume: bool = True  # upload a resume tailored to each job (falls back to resume_file)
     ai_essays: bool = True  # draft answers to required open-ended questions with AI
+
+
+def keep_document(src: Path, stem: str) -> Path:
+    """Copy a document into the AutoApply home as ``<stem><ext>`` (replacing older copies) and return it."""
+    src = src.expanduser().resolve()
+    dest = home() / f"{stem}{src.suffix.lower()}"
+    home().mkdir(parents=True, exist_ok=True)
+    if src != dest.resolve():
+        for old in home().glob(f"{stem}.*"):
+            if old.is_file() and old.suffix != ".bak":
+                old.unlink()
+        shutil.copy2(src, dest)
+    return dest
 
 
 def load_config() -> Config:

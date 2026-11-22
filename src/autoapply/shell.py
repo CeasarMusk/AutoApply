@@ -62,6 +62,7 @@ OPTIONS: dict[str, tuple[str, str, str]] = {
     "REMOTEOK": ("use_remoteok", "bool", "Also search Remote OK's remote-jobs feed"),
     "BACKEND": ("llm_backend", "choice:claude-code,api", "AI backend: claude-code (subscription) or api"),
     "MODEL": ("claude_code_model", "str", "Claude Code model alias (opus, sonnet, haiku)"),
+    "TAILOR": ("tailor_resume", "bool", "Tailor your resume to each job when applying"),
 }
 
 # Commands that act on a job id; with a job selected via `use`, the id can be omitted.
@@ -72,6 +73,7 @@ JOB_SHORTCUTS = {
     "ignore": ["job", "ignore"],
     "reset": ["job", "reset"],
     "apply": ["apply"],
+    "tailor": ["tailor"],
 }
 
 HELP: list[tuple[str, list[tuple[str, str]]]] = [
@@ -86,6 +88,7 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
         ("use <id> / back", "Select / deselect a job"),
         ("apply [id]", "Fill the application in a browser; you review and submit"),
         ("apply [id] --dry-run", "Preview what would be filled, invisibly"),
+        ("tailor [id] [--preview] [--redo]", "Make (and open) a resume tailored to the job"),
         ("info [id]", "Details and description"),
         ("open [id]", "Open the posting in your browser"),
         ("save | ignore | reset [id]", "Shortlist / hide / clear"),
@@ -97,10 +100,11 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
     ("Resume", [
         ("resume import <file.pdf>", "Turn your resume PDF into the master resume"),
         ("resume show", "View the master resume"),
+        ("resume transcript <file.pdf>", "Save your transcript for forms that ask for one"),
     ]),
     ("More", [
         ("companies add <slug…> | list | remove", "Extra companies beyond the built-in list"),
-        ("set <OPTION> <value> | unset | show options", "Settings: STARTER, REMOTEOK, BACKEND, MODEL"),
+        ("set <OPTION> <value> | unset | show options", "Settings: STARTER, REMOTEOK, BACKEND, MODEL, TAILOR"),
         ("usage", "Claude token usage"),
         ("banner, history, clear, help <command>, exit", ""),
     ]),
@@ -245,6 +249,8 @@ class Shell:
             resume = "[yellow]none yet — run `resume import <file>` or `resume build`[/yellow]"
         except Exception:
             resume = "[red]unreadable — run `resume validate`[/red]"
+        if cfg.transcript_file:
+            resume += " · transcript saved"
         with db.session() as s:
             total = s.exec(select(func.count()).select_from(Job).where(Job.status.not_in(["ignored", "closed"]))).one()
             new = s.exec(select(func.count()).select_from(Job).where(Job.status == "new")).one()

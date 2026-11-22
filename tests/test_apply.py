@@ -108,6 +108,31 @@ def test_saved_answer_not_in_options_is_asked(tmp_path):
     assert p.source == "ask" and "isn't an option" in p.note
 
 
+def test_transcript_upload(tmp_path):
+    F = scan.Field
+    fields = [F("t1", "file", "Unofficial Transcript", True, id="transcript"),
+              F("t2", "file", "Academic records (optional)", False)]
+    with_t = Applier(_job(), None, tmp_path / "r.pdf", interactive=False, store=AnswerStore({}),
+                     transcript_file=tmp_path / "t.pdf")
+    assert [(p.source, p.value) for p in with_t.plan(fields)] == [("file", str(tmp_path / "t.pdf"))] * 2
+    without = Applier(_job(), None, tmp_path / "r.pdf", interactive=False, store=AnswerStore({}))
+    assert [p.source for p in without.plan(fields)] == ["ask", "skip"]
+
+
+def test_keep_transcript_replaces_old_copy(tmp_path, monkeypatch):
+    from autoapply import config
+    from autoapply.apply.runner import keep_transcript, saved_transcript
+
+    monkeypatch.setenv("AUTOAPPLY_HOME", str(tmp_path / "home"))
+    (tmp_path / "a.docx").write_bytes(b"old")
+    (tmp_path / "b.pdf").write_bytes(b"new")
+    keep_transcript(tmp_path / "a.docx")
+    dest = keep_transcript(tmp_path / "b.pdf")
+    assert dest == tmp_path / "home" / "transcript.pdf" and dest.read_bytes() == b"new"
+    assert not (tmp_path / "home" / "transcript.docx").exists()
+    assert saved_transcript() == dest and config.load_config().transcript_file == str(dest)
+
+
 # ---------------------------------------------------------------------------
 # scanner + filler on local pages shaped like each ATS
 # ---------------------------------------------------------------------------
