@@ -149,3 +149,12 @@ def test_entry_level_catches_tricky_titles():
     assert matches(raw("Software Engineer I"), f)
     from autoapply.jobs.search import stem_words
     assert {"c++", "c#"} <= stem_words("C++ and C# developer")
+
+
+def test_listing_without_description_keeps_the_fetched_one():
+    with db.session() as s:
+        store(s, [raw(ext="1", description="Full posting text")])
+        store(s, [RawJob(source="greenhouse", company_slug="acme", external_id="1", company="Acme",
+                         title="Software Engineer, Backend", url="https://x/1")])
+        job = s.exec(select(Job).where(Job.external_id == "1")).one()
+        assert job.description == "Full posting text" and job.posted_at is not None

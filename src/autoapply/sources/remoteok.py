@@ -14,7 +14,7 @@ NAME = "remoteok"
 URL = "https://remoteok.com/api"
 
 
-def fetch(http: httpx.Client, slug: str = "all") -> list[RawJob]:
+def fetch(http: httpx.Client, slug: str = "all", query: tuple[str, ...] = ()) -> list[RawJob]:
     data = get_json(http, URL)
     jobs: list[RawJob] = []
     for j in data if isinstance(data, list) else []:

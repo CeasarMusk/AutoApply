@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.markup import escape as esc
 
-from ..llm import LLM, LLMError
+from ..llm import LLM, LLMError, backend_label
 from ..models import (
     Bullet,
     Certification,
@@ -107,7 +107,7 @@ def improve_bullet(text: str, context: str, llm: LLM | None) -> str:
     """Return the chosen text (original if the user rejects all suggestions)."""
     llm = llm or LLM()
     try:
-        with console.status("Asking Claude for suggestions…"):
+        with console.status(f"Asking {backend_label()} for suggestions…"):
             result = llm.parse(
                 task="improve_bullet",
                 system=IMPROVE_SYSTEM,

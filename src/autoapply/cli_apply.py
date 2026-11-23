@@ -16,6 +16,7 @@ from rich.text import Text
 from . import config, db
 from .apply import runner
 from .apply.answers import STANDARD, AnswerStore, ResumeFacts, describe
+from .jobs import details
 from .models import Job
 from .resume import store as resume_store
 
@@ -84,9 +85,21 @@ def _show_tailored(t, master, fresh: bool) -> None:
     console.print(Panel("\n".join(lines), title="Tailored resume", title_align="left", expand=True))
 
 
+def with_description(job: Job) -> Job:
+    """Make sure the job has its posting text (Keryx/Workday listings arrive without it)."""
+    if not details.needs_description(job):
+        return job
+    with console.status("Fetching the job posting…"):
+        job, err = details.ensure_description(job)
+    if err:
+        console.print(f"[yellow]Couldn't fetch the job description ({esc(err)}); "
+                      "tailoring and essays will only see the title.[/yellow]")
+    return job
+
+
 def make_tailored(job: Job, master, *, redo: bool = False) -> Path | None:
     """Tailor (or reuse the earlier tailoring for) this job. Returns the PDF, or None if it failed."""
-    from .llm import LLMError
+    from .llm import LLMError, backend_label
     from .resume import render, tailor
 
     pdf, meta = _tailor_paths(job, master)
@@ -99,8 +112,9 @@ def make_tailored(job: Job, master, *, redo: bool = False) -> Path | None:
             return pdf
         except Exception:
             pass
+    job = with_description(job)
     try:
-        with console.status(f"Tailoring your resume for {esc(job.company)} with Claude…"):
+        with console.status(f"Tailoring your resume for {esc(job.company)} with {backend_label()}…"):
             t = tailor.tailor(master, job)
         with console.status("Laying it out on one page…"):
             render.render_pdf(t, pdf)
@@ -201,6 +215,7 @@ def apply(
         resume = None
         console.print("[yellow]No master resume, so contact details can't be filled automatically.[/yellow]")
     resume_file = _resume_file(cfg)
+    job = with_description(job)  # tailoring and essays need the posting text
     if resume and cfg.tailor_resume and not no_tailor:
         resume_file = choose_resume(job, resume, resume_file, interactive=not dry_run)
     shot = config.output_dir() / f"dry-run-{job.id}.png" if dry_run else None

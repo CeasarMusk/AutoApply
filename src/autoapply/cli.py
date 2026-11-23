@@ -11,7 +11,7 @@ from rich.table import Table
 from sqlmodel import func, select
 
 from . import config, db
-from .llm import LLM, LLMError
+from .llm import LLM, LLMError, backend_label, ollama_models
 from .llm.client import ClaudeCodeBackend
 from .models import LLMUsage, MasterResume
 from .resume import builder, review, store, validate
@@ -109,8 +109,12 @@ def init() -> None:
     if not config.config_path().exists():
         cfg = config.Config()
         has_cc = ClaudeCodeBackend.available()
+        try:
+            local_models = ollama_models()
+        except LLMError:
+            local_models = None
         cfg.llm_backend = questionary.select(
-            "Which Claude should AutoApply use?",
+            "Which AI should AutoApply use?",
             choices=[
                 questionary.Choice(
                     "My Claude subscription, via Claude Code (no API cost)"
@@ -118,13 +122,23 @@ def init() -> None:
                     value="claude-code",
                 ),
                 questionary.Choice("Anthropic API key (pay per token)", value="api"),
+                questionary.Choice(
+                    "A local model in Ollama (free and private, but slower and less capable)"
+                    + ("" if local_models else "  [Ollama not running]" if local_models is None else "  [no models pulled]"),
+                    value="ollama",
+                ),
             ],
             default="claude-code" if has_cc else "api",
         ).ask() or cfg.llm_backend
+        if cfg.llm_backend == "ollama" and local_models:
+            cfg.ollama_model = questionary.select("Which Ollama model?", choices=local_models).ask() or local_models[0]
         config.save_config(cfg)
         console.print(f"Created {config.config_path()}")
         if cfg.llm_backend == "claude-code" and not has_cc:
             console.print("[yellow]Install Claude Code and run `claude` once to log in before using AI features.[/yellow]")
+        if cfg.llm_backend == "ollama" and not local_models:
+            console.print("[yellow]Start Ollama and pull a model (e.g. `ollama pull qwen3:14b`), then "
+                          "`set OLLAMA_MODEL <name>` in the console.[/yellow]")
     if not config.answers_path().exists():
         config.answers_path().write_text(config.DEFAULT_ANSWERS)
         console.print(f"Created {config.answers_path()} [dim](fill this in before applying)[/dim]")
@@ -165,7 +179,7 @@ def resume_import(
     _confirm_overwrite(yes)
     llm = LLM()
     try:
-        with console.status(f"Reading {file.name} with Claude…"):
+        with console.status(f"Reading {file.name} with {backend_label()}…"):
             result = import_resume(file, llm)
     except (ImportError_, LLMError) as e:
         _fail(str(e))
@@ -307,7 +321,7 @@ def resume_validate() -> None:
 
 @app.command()
 def usage() -> None:
-    """Show Claude token usage by task."""
+    """Show AI token usage by task."""
     with db.session() as s:
         rows = s.exec(
             select(
@@ -321,7 +335,7 @@ def usage() -> None:
     if not rows:
         console.print("No API calls logged yet.")
         return
-    t = Table(title="Claude usage (tokens)")
+    t = Table(title="AI usage (tokens)")
     for col in ["Task", "Calls", "Input", "Cache read", "Output"]:
         t.add_column(col, justify="right" if col != "Task" else "left")
     for task, n, inp, cache, out in rows:

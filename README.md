@@ -6,9 +6,11 @@ resumes and cover letters. You stay in the loop: the browser fills the form, you
 ## Status
 - [x] Master resume: import from PDF/DOCX/TXT, or build/edit step by step
 - [x] Interactive console (`autoapply` with no arguments)
-- [x] Job search: Greenhouse, Lever, Ashby public job boards
+- [x] Job search: Greenhouse, Lever, Ashby, SmartRecruiters, Workable, BambooHR, Workday, Oracle boards
+- [x] Offline list of ~15,000 US internships / new-grad roles from [Keryx](https://github.com/GodlyDonuts/keryx)
 - [x] Apply: fills Greenhouse / Lever / Ashby forms; you review and click Submit
-- [ ] Aggregator sources
+- [x] Aggregator sources (Remote OK, Keryx)
+- [x] Local AI via Ollama
 - [ ] Fit scoring
 - [x] Tailoring: one-page PDF resume per job, with preview
 
@@ -24,6 +26,14 @@ uv run autoapply init
   toward your normal subscription usage limits. Personal use only.
 - `api`: uses the Anthropic API (`export ANTHROPIC_API_KEY=...`), billed per token. Use this if you
   ever share the tool with other people.
+- `ollama`: a model running locally in [Ollama](https://ollama.com): free and nothing leaves your
+  machine, but slower and less capable than Claude. `ollama pull qwen3:14b` (or any model), then
+  `set BACKEND ollama` and `set OLLAMA_MODEL qwen3:14b` in the console. Tailoring, essays, resume
+  import and suggestions all use it, with the same fact guards (a rewrite that adds numbers or terms
+  not in your master resume is still rejected). Settings: `OLLAMA_HOST` (default `$OLLAMA_HOST` or
+  `localhost:11434`), `OLLAMA_CTX` (context window, default 16384; raise it for long postings if
+  your machine has the memory), `OLLAMA_THINK` (let thinking models reason first: better, slower).
+  Scanned (image-only) PDFs can't be imported with a local model.
 
 ## Quick start
 
@@ -40,9 +50,33 @@ autoapply > search
 2. **Level:** Internship, New grad / Entry, Mid, Senior, Any.
 3. **Where:** Remote only, United States, Anywhere, or a city.
 
-It searches ~60 built-in tech companies (Greenhouse / Lever / Ashby boards) plus the Remote OK feed
-(about 16,000 open jobs, ~15 s), and ranks results by how well they match your resume (titles, skills
-and level). "Jobs like my resume" makes one AI call to build a search profile, cached until the resume changes.
+It searches ~60 built-in tech companies (Greenhouse / Lever / Ashby boards), the Remote OK feed and
+Keryx's offline internship / new-grad list (see below), and ranks results by how well they match your
+resume (titles, skills and level). "Jobs like my resume" makes one AI call to build a search profile,
+cached until the resume changes.
+
+### Keryx: internships and new-grad roles
+[Keryx](https://github.com/GodlyDonuts/keryx) (MIT) tracks ~3,500 company boards and republishes
+the open US internship / new-grad roles every 15 minutes. AutoApply uses it in three layers:
+
+1. **Offline:** a snapshot ships inside the package (`src/autoapply/sources/data/`), so search works
+   with no network at all.
+2. **Synced:** `keryx sync` downloads the current list from GitHub (~9 MB, skipped when unchanged via
+   ETag, never more than once per 15 minutes). Searches do this automatically when the copy is older
+   than `KERYX_SYNC` hours (default 12; `0` = only when you run it).
+3. **Live:** with `KERYX_LIVE` on, a search also asks the boards behind its Keryx matches directly
+   (Greenhouse, Lever, Ashby, SmartRecruiters, Workable, BambooHR, Workday, Oracle), so you see
+   postings minutes old and drop ones that closed. At most `KERYX_MAX` boards per search (default 40).
+
+Being polite to those APIs: requests to the same host (or shared Workday/Oracle cluster) are spaced
+and limited to 2 at a time, a `429`/`503` is retried once after its `Retry-After` (or the board is
+skipped), and any board fetched in the last `CACHE` minutes (default 15) is read from
+`~/.autoapply/cache` instead. Workday and Oracle boards are searched with your keywords (a few pages)
+rather than downloaded whole. Listings that arrive without a description (Keryx, Workday) get it
+fetched once, when you open, tailor or apply to the job.
+
+Only Greenhouse, Lever and Ashby forms are auto-filled; for other boards `apply` opens the posting in
+your browser.
 
 | Command | What it does |
 |---|---|
@@ -52,8 +86,11 @@ and level). "Jobs like my resume" makes one AI call to build a search profile, c
 | `jobs [-s saved] [-g text] [--remote] [--all]` | Saved jobs, best match first |
 | `use <id>` → `info` / `open` / `save` / `ignore`, `back` | Work with one job |
 | `profile [--refresh]` | What your resume says to search for |
-| `companies add <slug>` | Add a company beyond the built-in list |
-| `set STARTER false` / `set REMOTEOK false` | Turn off the built-in list / Remote OK |
+| `companies add <slug>` | Add a company beyond the built-in list (Greenhouse / Lever / Ashby slug) |
+| `companies add <careers-board link>` | Same, for any supported board, e.g. `https://acme.wd5.myworkdayjobs.com/External` |
+| `keryx status` / `keryx sync [--force]` | How fresh the offline list is / update it now |
+| `set STARTER false` / `set REMOTEOK false` / `set KERYX false` | Turn off the built-in list / Remote OK / Keryx |
+| `set KERYX_LIVE false` | Search Keryx offline only (no live board checks) |
 | `help`, `exit` | |
 
 Jobs that disappear from a company's board are marked `closed` and hidden. The same role

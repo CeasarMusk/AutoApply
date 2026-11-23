@@ -81,3 +81,14 @@ def test_completer_knows_commands(sh):
     assert "add" in complete("companies ")
     assert "STARTER" in complete("set ")
     assert "--remote" in complete("search --")
+
+
+def test_ollama_and_keryx_options(sh, capsys):
+    sh.handle("set BACKEND ollama")
+    sh.handle("set OLLAMA_MODEL qwen3:14b")
+    sh.handle("set KERYX_SYNC 6.5")
+    sh.handle("set KERYX_MAX 10")
+    sh.handle("set CACHE -1")
+    cfg = config.load_config()
+    assert (cfg.llm_backend, cfg.ollama_model, cfg.keryx_sync_hours, cfg.keryx_live_max_boards) == ("ollama", "qwen3:14b", 6.5, 10)
+    assert cfg.board_cache_minutes == 15 and "≥ 0" in capsys.readouterr().out

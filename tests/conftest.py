@@ -9,8 +9,12 @@ from autoapply.models import Bullet, Contact, Experience, MasterResume, ResumeEx
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
+    from autoapply.sources import keryx
+
     monkeypatch.setenv("AUTOAPPLY_HOME", str(tmp_path / "home"))
-    return tmp_path / "home"
+    keryx.clear_cache()  # snapshot caches are per process; each test has its own home
+    yield tmp_path / "home"
+    keryx.clear_cache()
 
 
 def sample_resume() -> MasterResume:
@@ -67,3 +71,11 @@ def make_pdf(path: Path, lines: list[str]) -> Path:
     out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
     path.write_bytes(out.encode("latin-1"))
     return path
+
+
+@pytest.fixture(autouse=True)
+def no_request_spacing(monkeypatch):
+    """Tests use mock transports; don't wait between requests."""
+    from autoapply.sources import base
+
+    monkeypatch.setattr(base, "MIN_INTERVAL_S", 0.0)

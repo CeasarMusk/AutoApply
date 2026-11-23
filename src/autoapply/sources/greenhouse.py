@@ -10,7 +10,7 @@ NAME = "greenhouse"
 BASE = "https://boards-api.greenhouse.io/v1/boards"
 
 
-def fetch(http: httpx.Client, slug: str) -> list[RawJob]:
+def fetch(http: httpx.Client, slug: str, query: tuple[str, ...] = ()) -> list[RawJob]:
     data = get_json(http, f"{BASE}/{slug}/jobs", params={"content": "true"})
     jobs: list[RawJob] = []
     for j in data.get("jobs", []):
@@ -35,3 +35,8 @@ def fetch(http: httpx.Client, slug: str) -> list[RawJob]:
             )
         )
     return jobs
+
+
+def detail(http: httpx.Client, slug: str, external_id: str) -> str:
+    j = get_json(http, f"{BASE}/{slug}/jobs/{external_id}")
+    return html_to_text((j or {}).get("content"), escaped=True)

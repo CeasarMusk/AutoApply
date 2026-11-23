@@ -54,14 +54,26 @@ TIPS = [
     "`jobs --status saved` shows your shortlist.",
     "`profile` shows what AutoApply thinks you're looking for, based on your resume.",
     "Press Tab to complete commands, and ↑ to search your command history.",
+    "Internships and new-grad roles from Keryx are searched offline; `keryx sync` grabs the latest list.",
+    "`set BACKEND ollama` runs tailoring and essays on a local model, free and private.",
+    "`companies add <careers link>` works for Workday, Oracle, SmartRecruiters, Workable and BambooHR boards.",
 ]
 
 # name -> (config path, kind, description)
 OPTIONS: dict[str, tuple[str, str, str]] = {
     "STARTER": ("use_starter_companies", "bool", "Search the built-in list of ~60 tech companies"),
     "REMOTEOK": ("use_remoteok", "bool", "Also search Remote OK's remote-jobs feed"),
-    "BACKEND": ("llm_backend", "choice:claude-code,api", "AI backend: claude-code (subscription) or api"),
+    "KERYX": ("use_keryx", "bool", "Search Keryx's offline list of US internships / new-grad roles"),
+    "KERYX_LIVE": ("keryx_live", "bool", "Also check the boards behind Keryx matches live (fresher, more requests)"),
+    "KERYX_MAX": ("keryx_live_max_boards", "int", "Most boards checked live per search"),
+    "KERYX_SYNC": ("keryx_sync_hours", "float", "Re-download the Keryx list when older than this many hours (0: manual)"),
+    "CACHE": ("board_cache_minutes", "float", "Reuse a board's listing fetched within this many minutes"),
+    "BACKEND": ("llm_backend", "choice:claude-code,api,ollama", "AI backend: claude-code (subscription), api, or ollama (local)"),
     "MODEL": ("claude_code_model", "str", "Claude Code model alias (opus, sonnet, haiku)"),
+    "OLLAMA_MODEL": ("ollama_model", "str", "Ollama model, e.g. qwen3:14b (empty: first installed)"),
+    "OLLAMA_HOST": ("ollama_host", "str", "Ollama server URL (empty: $OLLAMA_HOST or localhost:11434)"),
+    "OLLAMA_CTX": ("ollama_num_ctx", "int", "Ollama context window in tokens"),
+    "OLLAMA_THINK": ("ollama_think", "bool", "Let thinking models reason before answering (better, slower)"),
     "TAILOR": ("tailor_resume", "bool", "Tailor your resume to each job when applying"),
     "OPTIONAL": ("ask_optional", "bool", "Ask about optional questions too (off: leave unknown ones blank)"),
 }
@@ -104,9 +116,10 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
         ("resume transcript <file.pdf>", "Save your transcript for forms that ask for one"),
     ]),
     ("More", [
-        ("companies add <slug…> | list | remove", "Extra companies beyond the built-in list"),
-        ("set <OPTION> <value> | unset | show options", "Settings: STARTER, REMOTEOK, BACKEND, MODEL, TAILOR"),
-        ("usage", "Claude token usage"),
+        ("companies add <slug|board link…> | list | remove", "Extra companies beyond the built-in list"),
+        ("keryx status | sync", "Offline internship / new-grad list: freshness, update now"),
+        ("set <OPTION> <value> | unset | show options", "Settings: KERYX, KERYX_LIVE, BACKEND, OLLAMA_MODEL, TAILOR…"),
+        ("usage", "AI token usage"),
         ("banner, history, clear, help <command>, exit", ""),
     ]),
 ]
@@ -260,6 +273,8 @@ class Shell:
             ai = f"Claude subscription via Claude Code ({cfg.claude_code_model})"
             if not ClaudeCodeBackend.available():
                 ai += " [red]— `claude` not found[/red]"
+        elif cfg.llm_backend == "ollama":
+            ai = f"local Ollama ({cfg.ollama_model or 'first installed model'})"
         else:
             ai = f"Anthropic API ({cfg.model})"
         from . import sources
@@ -268,7 +283,7 @@ class Shell:
         lines = [
             f"       =[ [bold]autoapply v{VERSION}[/bold]",
             f"+ -- --=[ resume: {resume}",
-            f"+ -- --=[ {n_companies} job boards · {total} jobs saved · [green]{new} new[/green] · [yellow]{saved} shortlisted[/yellow]",
+            f"+ -- --=[ {n_companies} job boards{' + Keryx offline list' if cfg.use_keryx else ''} · {total} jobs saved · [green]{new} new[/green] · [yellow]{saved} shortlisted[/yellow]",
             f"+ -- --=[ AI: {ai}",
         ]
         for l in lines:
@@ -380,6 +395,14 @@ class Shell:
             if not raw.strip().isdigit():
                 raise ValueError("Use a whole number.")
             return int(raw)
+        if kind == "float":
+            try:
+                value = float(raw)
+            except ValueError:
+                raise ValueError("Use a number.") from None
+            if value < 0:
+                raise ValueError("Use a number ≥ 0.")
+            return value
         if kind.startswith("choice:"):
             choices = kind.split(":", 1)[1].split(",")
             if raw.strip() not in choices:

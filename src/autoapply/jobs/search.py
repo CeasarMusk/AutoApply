@@ -168,6 +168,12 @@ def store(session: Session, raw_jobs: list[RawJob], scores: dict[str, tuple[int,
             matched_skills=", ".join(skills) or None,
         )
         job = existing.get(r.dedupe_key)
+        if job is not None:
+            # Listings without a description (Keryx, Workday searches) mustn't wipe one fetched earlier.
+            if not r.description and job.description:
+                fields.pop("description")
+            if r.posted_at is None:
+                fields.pop("posted_at")
         if job is None:
             job = Job(dedupe_key=r.dedupe_key, found_at=now, **fields)
             session.add(job)
