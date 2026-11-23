@@ -17,6 +17,7 @@ in a Playwright browser. The user reviews and clicks Submit; the program never s
 - `cli_queue.py`: `queue build/show/add/remove/clear/order/run` (apply queue; `run` calls `cli_apply.apply_one`)
 - `cli_jobs.py`: `search`, `jobs`, `job show/open/save/ignore/reset`, `companies`, `profile`
 - `cli_apply.py`: `apply` (wraps `apply_one`, which returns an outcome instead of exiting), `tailor`, `answers ...`; tailoring choice menu (use/preview/redo/original)
+- `picker.py`: searchable select/checkbox for long option lists (type to filter, ranked: "+1" → phone codes, "us"/"united" → United States, "austin tx" → "Austin, TX"; ↑/↓ moves, Tab checks in multi-select)
 - `shell.py`: interactive console: OPTIONS (`set X`), JOB_SHORTCUTS (`use <id>` then `apply`), HELP, banner
 - `config.py`: `~/.autoapply` paths (`AUTOAPPLY_HOME` overrides), `Config` model, `keep_document`
 - `models.py`: `MasterResume` (pydantic, stable ids) + sqlite tables `Job`, `Application`, `QueueItem`, `LLMUsage`

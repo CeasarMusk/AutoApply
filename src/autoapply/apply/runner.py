@@ -22,7 +22,7 @@ from rich.markup import escape as esc
 from rich.table import Table
 from rich.text import Text
 
-from .. import config, db
+from .. import config, db, picker
 from ..llm import LLMError
 from ..models import Application, Job, MasterResume
 from . import essay, fill, scan
@@ -196,13 +196,11 @@ class Applier:
             console.print(f"[yellow]{esc(p.note)}[/yellow]")
         if f.kind in ("select", "combobox", "radio", "yesno") and f.options:
             if f.multiple:
-                ans = ask(questionary.checkbox("Pick all that apply (space to select):", choices=f.options))
-                return ans or None
-            ans = ask(questionary.select("Answer:", choices=[*f.options, SKIP]))
+                return ask(picker.checkbox("Pick all that apply:", f.options)) or None
+            ans = ask(picker.select("Answer:", f.options, pinned=[SKIP]))
             return None if ans in (None, SKIP) else ans
         if f.kind == "checkboxes":
-            ans = ask(questionary.checkbox("Pick all that apply (space to select):", choices=f.options))
-            return ans or None
+            return ask(picker.checkbox("Pick all that apply:", f.options)) or None
         if f.kind == "checkbox":
             ans = ask(questionary.select("Check this box?", choices=["Yes", "No", SKIP]))
             return None if ans in (None, SKIP) else ans
