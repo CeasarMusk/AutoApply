@@ -43,6 +43,9 @@ SUPPORTED = {"greenhouse", "lever", "ashby"}
 
 def form_url(job: Job) -> str | None:
     if job.source == "greenhouse":
+        # Regional boards (job-boards.eu.greenhouse.io) and embed links from the GitHub lists keep their own URL.
+        if job.apply_url and re.search(r"\.(eu|anz)\.greenhouse\.io/|/embed/job_app", job.apply_url):
+            return job.apply_url
         return f"https://job-boards.greenhouse.io/{job.company_slug}/jobs/{job.external_id}"
     if job.source in ("lever", "ashby"):
         return job.apply_url or job.url
@@ -404,10 +407,45 @@ CAPTURE_JS = r"""
 """
 
 
-def _install_capture(page, captured: dict) -> None:
-    page.expose_function("__aaSnapshot", lambda data: captured.update(data or {}))
+def _install_capture(page, captured: dict, hooked: set) -> None:
+    """Snapshot the form when the user clicks Submit. The binding can only be exposed once per tab,
+    so do that once and register init scripts that re-hook every later page load in that tab."""
+    if id(page) not in hooked:
+        page.expose_function("__aaSnapshot", lambda data: captured.update(data or {}))
+        page.add_init_script(f"window.__aaRead = {scan.READ_JS};")
+        page.add_init_script(f"({CAPTURE_JS})();")
+        hooked.add(id(page))
+    # hook the document that's already loaded (no-op if the init script already did)
     page.evaluate(f"() => {{ window.__aaRead = {scan.READ_JS}; }}")
     page.evaluate(CAPTURE_JS)
+
+
+def _settle(page) -> None:
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=15_000)
+        page.wait_for_load_state("networkidle", timeout=8_000)
+    except Exception:
+        pass
+    page.wait_for_timeout(500)
+
+
+def _pick_page(ctx, current):
+    """Find the tab holding the form. Apply buttons often open the form in a new tab, so check
+    every open tab (newest first) and use the first one with form fields."""
+    pages = [p for p in reversed(ctx.pages) if not p.is_closed()]
+    if current in pages:  # newest tabs first, then the one we were on
+        pages.remove(current)
+        pages.append(current)
+    for p in pages:
+        _settle(p)
+        try:
+            fields = scan.scan(p)
+        except Exception:
+            continue
+        if fields:
+            return p, fields
+    fallback = pages[0] if pages else current
+    return fallback, []
 
 
 def run(job: Job, resume: MasterResume | None, resume_file: Path, *, headless: bool = False,
@@ -439,9 +477,18 @@ def run(job: Job, resume: MasterResume | None, resume_file: Path, *, headless: b
                     pass
                 page.wait_for_timeout(1000)
             captured: dict = {}
+            hooked: set = set()
+            rescan = False
             while True:
                 with console.status("Reading the form…"):
-                    fields = scan.scan(page)
+                    if rescan:
+                        page, fields = _pick_page(ctx, page)
+                        try:
+                            page.bring_to_front()
+                        except Exception:
+                            pass
+                    else:
+                        fields = scan.scan(page)
                     if job.source == "greenhouse":
                         scan.enrich_greenhouse(fields, scan.greenhouse_questions(job.company_slug, job.external_id))
                     for f in fields:
@@ -470,7 +517,7 @@ def run(job: Job, resume: MasterResume | None, resume_file: Path, *, headless: b
                     "[bold]Submit[/bold] yourself. Then come back here."
                 )
                 try:
-                    _install_capture(page, captured)
+                    _install_capture(page, captured, hooked)
                 except Exception:
                     pass
                 choice = ask(questionary.select(
@@ -482,6 +529,7 @@ def run(job: Job, resume: MasterResume | None, resume_file: Path, *, headless: b
                     ],
                 ))
                 if choice == "rescan":
+                    rescan = True
                     continue
                 final = captured or (scan.read_values(page) if not page.is_closed() else {})
                 app.learn_from_browser(plans, final)

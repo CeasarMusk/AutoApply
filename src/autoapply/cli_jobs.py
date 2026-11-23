@@ -221,8 +221,11 @@ def run_search(f: Filters, label: str) -> None:
         arranged = arrange([_row(j, new=j.id in new_ids) for j in rows])
         table_rows = arranged[:30]
 
-    for key, err in report.errors.items():
+    errors = list(report.errors.items())
+    for key, err in errors[:5]:
         console.print(f"[yellow]![/yellow] {esc(key)}: {esc(err)}", highlight=False)
+    if len(errors) > 5:
+        console.print(f"[yellow]![/yellow] …and {len(errors) - 5} more boards couldn't be fetched.", highlight=False)
     console.print(
         f"Scanned [bold]{len(report.jobs):,}[/bold] jobs on {len(report.per_company)} boards → "
         f"[bold]{len(hits)}[/bold] match ([green]{len(result.new)} new[/green])"
@@ -234,7 +237,8 @@ def run_search(f: Filters, label: str) -> None:
     console.print(_table(table_rows, "Best matches" if prof else "Matches", show_skills=bool(prof)))
     if len(arranged) > 30:
         console.print(f"[dim]…{len(arranged) - 30} more: `jobs`[/dim]")
-    console.print("[dim]`use <id>` then `info` / `open` / `save`. Remote OK listings are credited to remoteok.com.[/dim]")
+    console.print("[dim]`use <id>` then `info` / `open` / `save`. Listings credited to remoteok.com and "
+                  "SimplifyJobs (github.com/SimplifyJobs). [yellow]manual[/yellow] = AutoApply can't fill that site yet.[/dim]")
     if not prof:
         console.print("[dim]Import your resume (`resume import <pdf>`) to rank results by how well they match you.[/dim]")
 
@@ -279,6 +283,12 @@ def search(
 # ---------------------------------------------------------------------------
 # jobs list
 # ---------------------------------------------------------------------------
+
+
+AUTOFILL = {"greenhouse", "lever", "ashby"}  # sites the form filler supports
+SITE_NAMES = {"greenhouse": "Greenhouse", "lever": "Lever", "ashby": "Ashby", "remoteok": "Remote OK",
+              "workday": "Workday", "icims": "iCIMS", "smartrecruiters": "SmartRecruiters",
+              "workable": "Workable", "jobvite": "Jobvite", "web": "company site"}
 
 
 def _row(j: Job, new: bool = False) -> dict:
@@ -333,6 +343,8 @@ def _table(rows: list[dict], title: str, show_status: bool = False, show_skills:
             title.append(f" (+{n} more location{'s' if n > 1 else ''})", style="dim")
         if r.get("new"):
             title.append(" new", style="bold green")
+        if r["source"] not in AUTOFILL and r["source"] != "remoteok":
+            title.append(f" · {SITE_NAMES.get(r['source'], r['source'])} (manual)", style="yellow")
         cells = [str(r["id"]), _match_text(r["match"]), Text(company), title, loc_text, _ago(r["posted"])]
         if show_skills:
             cells.append(Text(r["skills"] or ""))
@@ -404,6 +416,8 @@ def job_show(
     meta.add_column()
     for label, value in [
         ("Company", job.company + (" (via Remote OK)" if job.source == "remoteok" else "")),
+        ("Applies on", SITE_NAMES.get(job.source, job.source)
+         + ("" if job.source in AUTOFILL else " (AutoApply can't fill this site yet)")),
         ("Location", (job.location or "-") + ("  (remote)" if job.remote else "")),
         ("Match", f"{job.match_score}% like your resume" if job.match_score is not None else None),
         ("Your skills", job.matched_skills),
@@ -479,7 +493,8 @@ def companies_list() -> None:
     mine = cfg.companies.pairs()
     console.print(f"Built-in list: {'[green]on[/green]' if cfg.use_starter_companies else '[red]off[/red]'} "
                   f"({len(sources.starter.pairs())} companies)   Remote OK: "
-                  f"{'[green]on[/green]' if cfg.use_remoteok else '[red]off[/red]'}")
+                  f"{'[green]on[/green]' if cfg.use_remoteok else '[red]off[/red]'}   GitHub lists: "
+                  f"{'[green]on[/green]' if cfg.use_github_lists else '[red]off[/red]'}")
     if cfg.use_starter_companies:
         console.print(Text(", ".join(sorted(s for _, s in sources.starter.pairs())), style="dim"))
     console.print(f"Your companies: {', '.join(f'{s} ({a})' for a, s in mine) if mine else 'none'}")

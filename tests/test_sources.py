@@ -105,3 +105,98 @@ def test_fetch_all_collects_errors(monkeypatch):
 
 def test_html_to_text_strips_scripts_and_entities():
     assert html_to_text("<p>a&nbsp;b</p><script>x()</script><br>c") == "a b\n\nc"
+
+
+# --- SimplifyJobs GitHub lists ---------------------------------------------------------------
+
+from autoapply import config as _config  # noqa: E402
+from autoapply.sources import github_lists  # noqa: E402
+
+LISTING = [
+    {"id": "a1", "active": True, "is_visible": True, "company_name": "ScoutAI", "title": "SWE Intern",
+     "url": "https://job-boards.greenhouse.io/scoutai/jobs/4643333008", "locations": ["SF"],
+     "date_posted": 1795392000, "category": "Software", "terms": ["Summer 2027"]},
+    {"id": "a2", "active": True, "is_visible": True, "company_name": "Benchling", "title": "SWE Intern",
+     "url": "https://jobs.ashbyhq.com/Benchling/96370d1b-d35e/application?embed=true", "locations": ["SF"]},
+    {"id": "a3", "active": True, "is_visible": True, "company_name": "Acme", "title": "Data Intern",
+     "url": "https://acme.wd5.myworkdayjobs.com/en-US/careers/job/Austin/Data-Intern_R123",
+     "locations": ["Remote in USA", "Austin, TX"], "sponsorship": "Does Not Offer Sponsorship"},
+    {"id": "a4", "active": True, "is_visible": True, "company_name": "Agency", "title": "Intern",
+     "url": "https://job-boards.eu.greenhouse.io/agency/jobs/4835696101", "locations": ["London, UK"]},
+    {"id": "a5", "active": False, "is_visible": True, "company_name": "Old", "title": "Closed",
+     "url": "https://jobs.lever.co/old/123/apply", "locations": []},
+    {"id": "a6", "active": True, "is_visible": False, "company_name": "Hidden", "title": "Hidden",
+     "url": "https://example.com/job", "locations": []},
+]
+
+
+def _github_http(calls: list):
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json=LISTING if "Internships" in str(request.url) else [])
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_site_for_and_board_posting():
+    assert github_lists.site_for("https://acme.wd5.myworkdayjobs.com/x") == "workday"
+    assert github_lists.site_for("https://careers-acme.icims.com/jobs/1/job") == "icims"
+    assert github_lists.site_for("https://acme.com/careers/1") == "web"
+    assert github_lists.board_posting("https://jobs.lever.co/Cirrus/12cd/apply") == ("lever", "cirrus", "12cd")
+    assert github_lists.board_posting("https://boards.greenhouse.io/embed/job_app?token=7918610") is None
+
+
+def test_github_lists_cache_boards_and_fetch():
+    calls: list = []
+    http = _github_http(calls)
+    items = github_lists.listings(http)
+    assert [x["id"] for x in items] == ["a1", "a2", "a3", "a4"]  # inactive and hidden dropped
+    github_lists.listings(http)
+    assert len(calls) == 2  # second call served from the disk cache
+
+    assert github_lists.boards(items) == [("greenhouse", "scoutai"), ("ashby", "benchling")]
+
+    jobs = {j.title + j.company: j for j in github_lists.fetch(http)}
+    assert set(jobs) == {"SWE InternScoutAI", "SWE InternBenchling", "Data InternAcme", "InternAgency"}
+    wd = jobs["Data InternAcme"]
+    assert (wd.source, wd.company_slug, wd.external_id) == ("workday", "simplify", "a3")
+    assert wd.remote and wd.location == "Remote in USA" and wd.locations == ["Austin, TX"]
+    assert "Does Not Offer Sponsorship" in wd.description
+    eu = jobs["InternAgency"]
+    assert (eu.source, eu.company_slug, eu.external_id) == ("greenhouse", "agency", "4835696101")
+
+
+def test_github_board_posting_matches_board_dedupe_key():
+    gh = github_lists.to_raw(LISTING[0])
+    board = github_lists.RawJob(source="greenhouse", company_slug="scoutai", external_id="4643333008",
+                                company="ScoutAI", title="x", url="u")
+    assert gh.dedupe_key == board.dedupe_key
+    assert gh.posted_at.year == 2026
+
+
+def test_search_targets_include_github_boards(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(sources, "client", lambda: _github_http(calls))
+    cfg = _config.Config(use_starter_companies=False, use_remoteok=False)
+    assert sources.search_targets(cfg) == [("greenhouse", "scoutai"), ("ashby", "benchling"), ("github", "all")]
+    cfg.use_github_lists = False
+    assert sources.search_targets(cfg) == []
+
+
+def test_fetch_all_prefers_boards_and_falls_back_to_feed(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "raw.githubusercontent" in url:
+            return httpx.Response(200, json=LISTING if "Internships" in url else [])
+        if "boards-api.greenhouse.io/v1/boards/scoutai" in url:
+            return httpx.Response(200, json={"jobs": [dict(GREENHOUSE["jobs"][0], id=4643333008)]})
+        return httpx.Response(404, json={})  # the ashby benchling board fails
+
+    monkeypatch.setattr(sources, "client", lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    report = sources.fetch_all([("greenhouse", "scoutai"), ("ashby", "benchling"), ("github", "all")])
+    by_board = {(j.source, j.company_slug): j for j in report.jobs}
+    assert by_board[("greenhouse", "scoutai")].description.startswith("About")  # the board's copy, not the feed's
+    assert sum(1 for j in report.jobs if j.company_slug == "scoutai") == 1
+    assert ("ashby", "benchling") in by_board  # feed listing stands in for the failed board
+    assert report.errors == {}
+    assert set(report.fetched_keys) == {("greenhouse", "scoutai"), ("workday", "simplify"), ("greenhouse", "agency")}

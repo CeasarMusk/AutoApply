@@ -19,7 +19,7 @@ in a Playwright browser. The user reviews and clicks Submit; the program never s
 - `config.py`: `~/.autoapply` paths (`AUTOAPPLY_HOME` overrides), `Config` model, `keep_document`
 - `models.py`: `MasterResume` (pydantic, stable ids) + sqlite tables `Job`, `Application`, `LLMUsage`
 - `llm/client.py`: `LLM.parse(task, system, content, output_format)` → validated pydantic object; backends `claude-code` (subscription via `claude -p`, default) and `api`
-- `sources/`: greenhouse, lever, ashby, remoteok fetchers; `starter.py` = built-in company list
+- `sources/`: greenhouse, lever, ashby, remoteok fetchers; `starter.py` = built-in company list; `github_lists.py` = SimplifyJobs lists (adds their ATS boards to search + lists other sites as jobs, cached 1h in `~/.autoapply/cache`)
 - `jobs/`: `search.py` filters, `rank.py` local 0-100 match score (no AI), `profile.py` one cached AI call → search profile, `presets.py` search menu
 - `resume/`: `importer.py` (file → MasterResume via Claude), `store.py` (YAML + id assignment), `builder.py` (menu editor), `validate.py`, `review.py`, `tailor.py` (AI picks by id + rewrite guard), `render.py` (Jinja HTML → PDF via Chromium, fits one page)
 - `apply/`: `scan.py` (JS form scanner → `Field`s; Greenhouse API enrichment), `fill.py` (fills one field per kind), `answers.py` (standard question keys, `AnswerStore`, `match_option`, `to_iso_date`), `runner.py` (`Applier`: plan → draft essays → ask unknowns → fill → summary → learn edits), `essay.py`

@@ -6,11 +6,11 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
-from . import ashby, greenhouse, lever, remoteok, starter
+from . import ashby, github_lists, greenhouse, lever, remoteok, starter
 from .base import NotFound, RawJob, SourceError, client
 
 ATS = {m.NAME: m for m in (greenhouse, lever, ashby)}  # per-company boards
-FEEDS = {remoteok.NAME: remoteok}  # multi-company feeds (slug is ignored)
+FEEDS = {remoteok.NAME: remoteok, github_lists.NAME: github_lists}  # multi-company feeds (slug is ignored)
 ALL = {**ATS, **FEEDS}
 
 
@@ -34,13 +34,14 @@ def fetch_company(ats: str, slug: str, http=None) -> list[RawJob]:
             http.close()
 
 
-def fetch_all(companies: list[tuple[str, str]], workers: int = 12,
+def fetch_all(companies: list[tuple[str, str]], workers: int = 24,
               progress: Callable[[int, int], None] | None = None) -> FetchReport:
     """Fetch every (ats, slug) in parallel. One company failing doesn't stop the rest.
 
     progress(done, total) is called as each board finishes.
     """
     report = FetchReport()
+    feed_jobs: list[RawJob] = []
     with client() as http, ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(fetch_company, ats, slug, http): (ats, slug) for ats, slug in companies}
         for done, fut in enumerate(as_completed(futures), 1):
@@ -56,9 +57,22 @@ def fetch_all(companies: list[tuple[str, str]], workers: int = 12,
             except SourceError as e:
                 report.errors[key] = str(e)
                 continue
-            report.jobs.extend(jobs)
             report.per_company[key] = len(jobs)
-            report.fetched_keys[(ats, slug)] = {j.dedupe_key for j in jobs}
+            if ats in FEEDS:
+                feed_jobs.extend(jobs)
+            else:
+                report.jobs.extend(jobs)
+                report.fetched_keys.setdefault((ats, slug), set()).update(j.dedupe_key for j in jobs)
+    # A feed listing on a board we fetched is a duplicate without the description; keep the board's copy.
+    # Listings on boards that failed stand in for them, so those failures aren't worth reporting.
+    boards_ok = set(report.fetched_keys)
+    for j in feed_jobs:
+        if (j.source, j.company_slug) in boards_ok:
+            continue
+        report.jobs.append(j)
+        if report.errors.pop(f"{j.source}:{j.company_slug}", None) is None:
+            report.fetched_keys.setdefault((j.source, j.company_slug), set()).add(j.dedupe_key)
+        # else: the board failed (maybe briefly), so don't close its saved jobs based on the feed alone
     return report
 
 
@@ -76,10 +90,17 @@ def detect(slug: str) -> list[tuple[str, int]]:
 
 
 def search_targets(cfg) -> list[tuple[str, str]]:
-    """Everything a search should hit: your companies, the starter list, and feeds."""
+    """Everything a search should hit: your companies, the starter list, GitHub-list boards, and feeds."""
     targets = list(cfg.companies.pairs())
     if cfg.use_starter_companies:
         targets += starter.pairs()
+    if cfg.use_github_lists:
+        try:
+            with client() as http:
+                targets += github_lists.boards(github_lists.listings(http))
+        except SourceError:
+            pass  # the feed itself will report the error
+        targets.append((github_lists.NAME, "all"))
     if cfg.use_remoteok:
         targets.append((remoteok.NAME, "all"))
     return list(dict.fromkeys(targets))

@@ -60,6 +60,7 @@ TIPS = [
 OPTIONS: dict[str, tuple[str, str, str]] = {
     "STARTER": ("use_starter_companies", "bool", "Search the built-in list of ~60 tech companies"),
     "REMOTEOK": ("use_remoteok", "bool", "Also search Remote OK's remote-jobs feed"),
+    "GITHUB": ("use_github_lists", "bool", "Also search SimplifyJobs' GitHub internship/new-grad lists"),
     "BACKEND": ("llm_backend", "choice:claude-code,api", "AI backend: claude-code (subscription) or api"),
     "MODEL": ("claude_code_model", "str", "Claude Code model alias (opus, sonnet, haiku)"),
     "TAILOR": ("tailor_resume", "bool", "Tailor your resume to each job when applying"),
@@ -105,7 +106,7 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
     ("More", [
         ("companies add <slug…> | list | remove", "Extra companies beyond the built-in list"),
-        ("set <OPTION> <value> | unset | show options", "Settings: STARTER, REMOTEOK, BACKEND, MODEL, TAILOR"),
+        ("set <OPTION> <value> | unset | show options", "Settings: STARTER, REMOTEOK, GITHUB, BACKEND, MODEL, TAILOR"),
         ("usage", "Claude token usage"),
         ("banner, history, clear, help <command>, exit", ""),
     ]),

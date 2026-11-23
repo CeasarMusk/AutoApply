@@ -371,3 +371,15 @@ def test_rescan_keeps_page_values_and_reuses_drafts(tmp_path):
     p = app.plan([essay_f], {"e": ""})
     app.draft_essays(p)
     assert (p[0].source, p[0].value) == ("ai", "earlier draft")  # no second AI call
+
+
+def test_form_url_keeps_regional_greenhouse_links():
+    from autoapply.apply import runner
+    from autoapply.models import Job
+
+    eu = "https://job-boards.eu.greenhouse.io/agency/jobs/4835696101"
+    job = Job(source="greenhouse", company_slug="agency", external_id="4835696101", company="A", title="t",
+              url=eu, apply_url=eu, dedupe_key="k")
+    assert runner.form_url(job) == eu
+    job.apply_url = "https://stripe.com/jobs/search?gh_jid=1"
+    assert runner.form_url(job) == "https://job-boards.greenhouse.io/agency/jobs/4835696101"

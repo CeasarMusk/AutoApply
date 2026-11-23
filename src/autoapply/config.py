@@ -85,6 +85,7 @@ class Config(BaseModel):
     companies: Companies = Field(default_factory=Companies)
     use_starter_companies: bool = True  # also search the built-in list of ~60 tech companies
     use_remoteok: bool = True  # also search Remote OK's remote-jobs feed
+    use_github_lists: bool = True  # also search SimplifyJobs' GitHub internship/new-grad lists (and their boards)
     search: SearchDefaults = Field(default_factory=SearchDefaults)
     last_search: dict | None = None  # the last preset picked in the search menu
     resume_file: str | None = None  # the resume file uploaded to applications (copied here on import)
