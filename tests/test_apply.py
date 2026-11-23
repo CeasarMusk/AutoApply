@@ -383,3 +383,145 @@ def test_form_url_keeps_regional_greenhouse_links():
     assert runner.form_url(job) == eu
     job.apply_url = "https://stripe.com/jobs/search?gh_jid=1"
     assert runner.form_url(job) == "https://job-boards.greenhouse.io/agency/jobs/4835696101"
+
+
+# ---------------------------------------------------------------------------
+# site adapters, generic sites, multi-page forms
+# ---------------------------------------------------------------------------
+
+from autoapply.apply import sites  # noqa: E402
+
+
+def _site_job(source, url, slug="simplify", ext="1"):
+    return Job(source=source, company_slug=slug, external_id=ext, company="Acme", title="Intern",
+               url=url, apply_url=url, dedupe_key=f"{source}{url}")
+
+
+def test_for_job_routes_by_source_then_url():
+    assert sites.for_job(_site_job("lever", "https://jobs.lever.co/a/1/apply")).name == "lever"
+    wd = sites.for_job(_site_job("workday", "https://acme.wd5.myworkdayjobs.com/x"))
+    assert wd.name == "generic" and wd.label == "Workday" and not wd.full_support
+    # Remote OK job whose apply link goes to an Ashby board uses the Ashby adapter
+    assert sites.for_job(_site_job("remoteok", "https://jobs.ashbyhq.com/acme/1")).name == "ashby"
+    assert sites.describe("greenhouse") == ("Greenhouse", True)
+    assert sites.describe("icims") == ("iCIMS", False)
+
+
+POSTING = """<html><body>
+<div id="cookies">We use cookies. <button onclick="this.parentNode.remove()">Accept all</button></div>
+<h1>Data Intern</h1><p>About the role…</p>
+<a href="#" onclick="document.getElementById('app').style.display='block'; this.remove(); return false;">Apply now</a>
+<form id="app" style="display:none">
+  <h2>Your details</h2>
+  <label for="fn">First name *</label><input id="fn" required>
+  <label for="em">Email *</label><input id="em" type="email" required>
+  <label for="pw">Password</label><input id="pw" type="password">
+  <button type="submit">Apply</button>
+</form></body></html>"""
+
+
+def test_generic_prepare_dismisses_cookies_and_opens_form(browser):
+    ctx = browser.new_context()
+    page = ctx.new_page()
+    page.set_content(POSTING)
+    page = sites.Site().prepare(ctx, page)
+    assert page.locator("#cookies").count() == 0
+    labels = {f.label for f in scan.scan(page)}
+    assert {"First name", "Email"} <= labels
+    assert "Password" not in labels  # passwords are never read or saved
+    ctx.close()
+
+
+def test_click_apply_ignores_form_submit_buttons(browser):
+    ctx = browser.new_context()
+    page = ctx.new_page()
+    page.set_content('<form><label for="a">Name</label><input id="a"><button type="submit">Apply</button></form>')
+    assert sites.click_apply(ctx, page) is None
+    ctx.close()
+
+
+def test_step_signature_changes_on_step_not_on_typing(browser):
+    page = browser.new_page()
+    page.set_content('<h2>My Information</h2><label for="a">Name</label><input id="a">')
+    site = sites.Site()
+    before = site.step_signature(page)
+    page.fill("#a", "Alex")
+    assert site.step_signature(page) == before
+    page.evaluate("document.querySelector('h2').innerText = 'My Experience'")
+    assert site.step_signature(page) != before
+
+
+class _FakePage:
+    def __init__(self, sigs):
+        self.sigs = iter(sigs)
+        self.url = "u"
+
+    def is_closed(self):
+        return False
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def evaluate(self, js):
+        return next(self.sigs)
+
+
+class _FakeCtx:
+    def __init__(self, page):
+        self.pages = [page]
+
+
+def _pipe_question(inp):
+    import questionary
+    from prompt_toolkit.output import DummyOutput
+
+    return questionary.select("Done?", choices=["done", "quit"], input=inp, output=DummyOutput())
+
+
+def test_wait_for_user_returns_auto_when_page_moves():
+    from prompt_toolkit.input import create_pipe_input
+
+    from autoapply.apply import runner
+
+    page = _FakePage(["step1", "step1", "step1", "step2"])
+    with create_pipe_input() as inp:
+        assert runner.wait_for_user(_FakeCtx(page), page, sites.Site(), _pipe_question(inp), poll_ms=1) == runner.AUTO
+
+
+def test_wait_for_user_returns_the_answer():
+    import itertools
+
+    from prompt_toolkit.input import create_pipe_input
+
+    from autoapply.apply import runner
+
+    page = _FakePage(itertools.repeat("same"))
+    with create_pipe_input() as inp:
+        inp.send_text("\r")  # pick the first choice
+        assert runner.wait_for_user(_FakeCtx(page), page, sites.Site(), _pipe_question(inp), poll_ms=1) == "done"
+
+
+def test_learn_from_steps_covers_every_page(monkeypatch):
+    from autoapply.apply import runner
+
+    app = Applier(_site_job("workday", "https://x"), sample_resume(), resume_file=None, store=AnswerStore())
+    f1 = scan.Field(aa="aa0-0", kind="text", label="How did you hear about us?")
+    f2 = scan.Field(aa="aa0-0", kind="text", label="Preferred pronouns")  # same aa on the next page
+    p1, p2 = Planned(f1, None, "ask"), Planned(f2, None, "ask")
+    monkeypatch.setattr(runner, "ask", lambda q: [0, 1])
+    app.learn_from_steps([([p1], {"aa0-0": "LinkedIn"}), ([p2], {"aa0-0": "they/them"})])
+    assert app.store.lookup("How did you hear about us?")[0] == "LinkedIn"
+    assert app.store.lookup("Preferred pronouns")[0] == "they/them"
+
+
+def test_honeypots_are_never_scanned(browser):
+    _, fields = _scan(browser, '<label for="w">Enter website. This input is for robots only, do not enter if '
+                               "you're human.</label><input id=\"w\"><label for=\"n\">Name</label><input id=\"n\">")
+    assert list(fields) == ["Name"]
+
+
+@pytest.mark.parametrize("text,ok", [("Apply", True), ("Apply for this job online", True), ("Apply Manually", True),
+                                     ("Start your application", True), ("Apply with LinkedIn", False),
+                                     ("Applied", False)])
+def test_apply_button_text(text, ok):
+    assert bool(sites.APPLY_RE.match(text)) is ok

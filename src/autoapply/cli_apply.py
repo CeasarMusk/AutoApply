@@ -14,7 +14,7 @@ from rich.table import Table
 from rich.text import Text
 
 from . import config, db
-from .apply import runner
+from .apply import runner, sites
 from .apply.answers import STANDARD, AnswerStore, ResumeFacts, describe
 from .models import Job
 from .resume import store as resume_store
@@ -184,13 +184,10 @@ def apply(
         job = s.get(Job, job_id)
     if job is None:
         _fail(f"No job with id {job_id}.")
-    if job.source not in runner.SUPPORTED:
-        console.print(f"[yellow]{esc(job.company)}'s posting is on an external site AutoApply can't fill yet. "
-                      f"Opening it so you can apply there.[/yellow]")
-        import webbrowser
-
-        webbrowser.open(job.apply_url or job.url)
-        return
+    site = sites.for_job(job)
+    if not site.full_support:
+        console.print(f"[yellow]{esc(job.company)}'s application is on {esc(site.label)}. AutoApply fills what it "
+                      f"recognizes there (best effort); finish the rest in the browser.[/yellow]")
     if job.status == "applied" and not dry_run and not questionary.confirm(
             "You already applied to this one. Open it anyway?", default=False).ask():
         return

@@ -23,9 +23,10 @@ in a Playwright browser. The user reviews and clicks Submit; the program never s
 - `jobs/`: `search.py` filters, `rank.py` local 0-100 match score (no AI), `profile.py` one cached AI call → search profile, `presets.py` search menu
 - `resume/`: `importer.py` (file → MasterResume via Claude), `store.py` (YAML + id assignment), `builder.py` (menu editor), `validate.py`, `review.py`, `tailor.py` (AI picks by id + rewrite guard), `render.py` (Jinja HTML → PDF via Chromium, fits one page)
 - `apply/`: `scan.py` (JS form scanner → `Field`s; Greenhouse API enrichment), `fill.py` (fills one field per kind), `answers.py` (standard question keys, `AnswerStore`, `match_option`, `to_iso_date`), `runner.py` (`Applier`: plan → draft essays → ask unknowns → fill → summary → learn edits), `essay.py`
+  - `apply/sites/`: per-site adapters (`for_job`): form URL, `prepare` (cookie banner, click "Apply"), `enrich`, `step_signature`. Greenhouse/Lever/Ashby are full support; every other site runs the generic adapter (best effort). `runner.wait_for_user` re-scans automatically when the step/URL/tab changes.
 
 ## Rules
-- Never click Submit or press Enter in form inputs (Enter can submit). The user submits.
+- Never click Submit or press Enter in form inputs (Enter can submit). The user submits. Adapters may click "Apply"-type links to reach a form, never Submit / Create Account / sign-in, and never touch bot checks (CAPTCHA, Cloudflare). Password fields are never scanned; honeypot fields are dropped.
 - Tailoring/essays must never invent facts: tailoring selects master items by id; `tailor.check_rewrite` rejects rewrites adding numbers or terms not in the master resume.
 - Sensitive answers (work auth, sponsorship, EEO, salary: `answers.SENSITIVE`) are never guessed from the resume; only saved answers or the user.
 - Personal data lives in `~/.autoapply`, never in the repo.

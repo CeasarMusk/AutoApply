@@ -25,7 +25,7 @@ from rich.text import Text
 from .. import config, db
 from ..llm import LLMError
 from ..models import Application, Job, MasterResume
-from . import essay, fill, scan
+from . import essay, fill, scan, sites
 from .answers import ASK_IF_OPTIONAL, SENSITIVE, AnswerStore, ResumeFacts, describe, match_option, normalize, standard_key, to_iso_date
 
 console = Console()
@@ -38,18 +38,8 @@ def ask(q):
     return _pool.submit(q.ask).result()
 
 
-SUPPORTED = {"greenhouse", "lever", "ashby"}
-
-
-def form_url(job: Job) -> str | None:
-    if job.source == "greenhouse":
-        # Regional boards (job-boards.eu.greenhouse.io) and embed links from the GitHub lists keep their own URL.
-        if job.apply_url and re.search(r"\.(eu|anz)\.greenhouse\.io/|/embed/job_app", job.apply_url):
-            return job.apply_url
-        return f"https://job-boards.greenhouse.io/{job.company_slug}/jobs/{job.external_id}"
-    if job.source in ("lever", "ashby"):
-        return job.apply_url or job.url
-    return None
+def form_url(job: Job) -> str:
+    return sites.for_job(job).form_url(job)
 
 
 @dataclass
@@ -349,6 +339,32 @@ class Applier:
 
     def learn_from_browser(self, plans: list[Planned], final: dict) -> None:
         """Offer to save answers the user typed or changed in the browser."""
+        self.learn_from_steps([(plans, final)])
+
+    def learn_from_steps(self, steps: list[tuple[list[Planned], dict]]) -> None:
+        """Same, for a form that spanned several pages: each page's plans with what it last showed."""
+        changes: list[tuple[Planned, object]] = []
+        seen: set[str] = set()
+        for plans, final in steps:
+            for p, v in self._changes(plans, final):
+                if p.field.label not in seen:
+                    seen.add(p.field.label)
+                    changes.append((p, v))
+        if not changes or not self.interactive:
+            return
+        choices = [questionary.Choice(f"{p.field.label[:70]} → {', '.join(v) if isinstance(v, list) else v}"[:110],
+                                      value=i, checked=True) for i, (p, v) in enumerate(changes)]
+        picked = ask(questionary.checkbox(
+            f"You answered or changed {len(changes)} question(s) in the browser. Save them for next time?",
+            choices=choices))
+        for i in picked or []:
+            p, v = changes[i]
+            self.store.remember(p.field.label, v)
+        if picked:
+            self.store.save()
+            console.print(f"[green]Saved {len(picked)} answer(s).[/green]")
+
+    def _changes(self, plans: list[Planned], final: dict) -> list[tuple[Planned, object]]:
         changes: list[tuple[Planned, object]] = []
         for p in plans:
             f = p.field
@@ -374,19 +390,7 @@ class Applier:
                 continue
             if b != n:
                 changes.append((p, now_val))
-        if not changes or not self.interactive:
-            return
-        choices = [questionary.Choice(f"{p.field.label[:70]} → {', '.join(v) if isinstance(v, list) else v}"[:110],
-                                      value=i, checked=True) for i, (p, v) in enumerate(changes)]
-        picked = ask(questionary.checkbox(
-            f"You answered or changed {len(changes)} question(s) in the browser. Save them for next time?",
-            choices=choices))
-        for i in picked or []:
-            p, v = changes[i]
-            self.store.remember(p.field.label, v)
-        if picked:
-            self.store.save()
-            console.print(f"[green]Saved {len(picked)} answer(s).[/green]")
+        return changes
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +405,7 @@ CAPTURE_JS = r"""
   document.addEventListener('submit', send, true);
   document.addEventListener('click', (e) => {
     const b = e.target.closest('button, input[type=submit]');
-    if (b && /submit|apply|send/i.test(b.innerText || b.value || '')) send();
+    if (b && /submit|apply|send|next|continue|review|save/i.test(b.innerText || b.value || '')) send();
   }, true);
 }
 """
@@ -420,13 +424,63 @@ def _install_capture(page, captured: dict, hooked: set) -> None:
     page.evaluate(CAPTURE_JS)
 
 
-def _settle(page) -> None:
-    try:
-        page.wait_for_load_state("domcontentloaded", timeout=15_000)
-        page.wait_for_load_state("networkidle", timeout=8_000)
-    except Exception:
-        pass
-    page.wait_for_timeout(500)
+_settle = sites._settle
+
+
+AUTO = "auto"  # what the wait returns when the page moved on by itself
+
+
+def _open_pages(ctx) -> list:
+    return [p for p in ctx.pages if not p.is_closed()]
+
+
+def wait_for_user(ctx, page, site: sites.Site, question, poll_ms: int = 800):
+    """Show the "when you're done" prompt, but return AUTO as soon as the form moves to another
+    step, page or tab, so the new page gets filled without you asking."""
+    def sig(p):
+        return (len(_open_pages(ctx)), site.step_signature(p) if not p.is_closed() else "")
+
+    before = sig(page)
+    fut = _pool.submit(question.ask)
+    while not fut.done():
+        try:
+            (page if not page.is_closed() else _open_pages(ctx)[-1]).wait_for_timeout(poll_ms)
+        except Exception:
+            break  # browser closed: let the prompt answer
+        if fut.done():
+            break
+        try:
+            now = sig(page)
+        except Exception:
+            continue
+        if now != before:
+            _cancel_prompt(question)
+            try:
+                fut.result(timeout=5)
+            except Exception:
+                pass
+            return AUTO
+    return fut.result()
+
+
+def _cancel_prompt(question) -> None:
+    """End a questionary prompt that's running on the worker thread."""
+    import time
+
+    app = getattr(question, "application", None)
+
+    def stop():
+        try:
+            app.exit(result=AUTO)
+        except Exception:
+            pass  # already answered
+
+    for _ in range(50):
+        loop = getattr(app, "loop", None)
+        if loop is not None and getattr(app, "is_running", False):
+            loop.call_soon_threadsafe(stop)
+            return
+        time.sleep(0.05)
 
 
 def _pick_page(ctx, current):
@@ -453,9 +507,8 @@ def run(job: Job, resume: MasterResume | None, resume_file: Path, *, headless: b
         transcript_file: Path | None = None, ask_optional: bool = True) -> Result:
     from playwright.sync_api import sync_playwright
 
-    url = form_url(job)
-    if url is None:
-        raise RuntimeError(f"Auto-fill supports Greenhouse, Lever and Ashby; this job is from {job.source}.")
+    site = sites.for_job(job)
+    url = site.form_url(job)
     app = Applier(job, resume, resume_file, interactive=not dry_run, use_ai=use_ai,
                   transcript_file=transcript_file, ask_optional=ask_optional)
     result = Result(url=url)
@@ -471,68 +524,78 @@ def run(job: Job, resume: MasterResume | None, resume_file: Path, *, headless: b
         try:
             with console.status("Opening the application form…"):
                 page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=15_000)
-                except Exception:
-                    pass
-                page.wait_for_timeout(1000)
+                _settle(page, idle_ms=15_000)
+                page = site.prepare(ctx, page)
             captured: dict = {}
             hooked: set = set()
-            rescan = False
+            steps: list[tuple[list[Planned], dict]] = []  # earlier pages of a multi-page form
+            plans: list[Planned] = []
+            rescan = auto = False
             while True:
                 with console.status("Reading the form…"):
                     if rescan:
                         page, fields = _pick_page(ctx, page)
-                        try:
-                            page.bring_to_front()
-                        except Exception:
-                            pass
+                        # With no fields (a sign-in or confirmation page) there's nothing to fill: keep waiting.
+                        if fields:
+                            try:
+                                page.bring_to_front()
+                            except Exception:
+                                pass
                     else:
                         fields = scan.scan(page)
-                    if job.source == "greenhouse":
-                        scan.enrich_greenhouse(fields, scan.greenhouse_questions(job.company_slug, job.external_id))
+                    site.enrich(job, fields)
                     for f in fields:
                         if f.kind == "combobox" and not f.options:
                             scan.load_combobox_options(page, f)
-                if not fields:
-                    console.print("[yellow]No form fields found on this page. If there's an Apply button, click it, "
-                                  "then choose “Re-scan”.[/yellow]")
-                plans = app.plan(fields, scan.read_values(page))
-                app.draft_essays(plans)
-                app.ask_unknowns(plans)
-                with console.status("Filling in the form…"):
-                    app.fill_all(page, plans)
-                result.plans = plans
-                console.print(app.summary(plans))
+                if fields or not auto:
+                    if not fields:
+                        console.print("[yellow]" + (
+                            "The site is checking that you're human. Solve it in the browser; "
+                            if sites.is_challenge(page) else
+                            "No form fields found on this page. If there's an Apply button or a sign-in, do that; ")
+                            + "AutoApply fills the form when it appears.[/yellow]")
+                    if plans:
+                        steps.append((plans, dict(captured)))
+                        captured.clear()
+                    plans = app.plan(fields, scan.read_values(page))
+                    app.draft_essays(plans)
+                    app.ask_unknowns(plans)
+                    with console.status("Filling in the form…"):
+                        app.fill_all(page, plans)
+                    result.plans = [p for st, _ in steps for p in st] + plans
+                    console.print(app.summary(plans))
 
                 if dry_run:
                     if screenshot:
                         page.screenshot(path=str(screenshot), full_page=True)
                     return result
 
-                todo = sum(1 for p in plans if p.needs_user or p.source == "failed")
-                console.print(
-                    ("[bold yellow]" + f"{todo} field(s) outlined in orange need you. " + "[/bold yellow]" if todo else "")
-                    + "Review everything in the browser, solve the CAPTCHA if one appears, and click "
-                    "[bold]Submit[/bold] yourself. Then come back here."
-                )
+                if fields or not auto:
+                    todo = sum(1 for p in plans if p.needs_user or p.source == "failed")
+                    console.print(
+                        ("[bold yellow]" + f"{todo} field(s) outlined in orange need you. " + "[/bold yellow]" if todo else "")
+                        + "Review everything in the browser, solve the CAPTCHA if one appears, and click "
+                        "[bold]Next[/bold] / [bold]Submit[/bold] yourself. New pages are filled as they appear."
+                    )
                 try:
                     _install_capture(page, captured, hooked)
                 except Exception:
                     pass
-                choice = ask(questionary.select(
+                choice = wait_for_user(ctx, page, site, questionary.select(
                     "When you're done:",
                     choices=[
                         questionary.Choice("✓ I submitted the application", value="done"),
-                        questionary.Choice("↻ Re-scan the page and fill again (next page / new questions)", value="rescan"),
+                        questionary.Choice("↻ Re-scan the page and fill again (new questions)", value="rescan"),
                         questionary.Choice("✗ I didn't submit — close", value="quit"),
                     ],
                 ))
-                if choice == "rescan":
-                    rescan = True
+                if choice in ("rescan", AUTO):
+                    rescan, auto = True, choice == AUTO
+                    if auto:
+                        console.print("[dim]The page changed — reading it…[/dim]")
                     continue
                 final = captured or (scan.read_values(page) if not page.is_closed() else {})
-                app.learn_from_browser(plans, final)
+                app.learn_from_steps([*steps, (plans, final)])
                 result.submitted = choice == "done"
                 return result
         finally:

@@ -7,6 +7,7 @@ clean labels and the options of the custom dropdowns.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import httpx
@@ -67,7 +68,7 @@ SCAN_JS = r"""
   };
   const isControl = c => {
     const t = (c.type || '').toLowerCase();
-    if (['hidden', 'submit', 'button', 'image', 'reset', 'search'].includes(t)) return false;
+    if (['hidden', 'submit', 'button', 'image', 'reset', 'search', 'password'].includes(t)) return false;  // passwords: never read or saved
     if (/recaptcha|captcha/i.test((c.name || '') + (c.id || '') + (c.className || ''))) return false;
     if (c.getAttribute('aria-hidden') === 'true') return false;
     return true;
@@ -279,7 +280,13 @@ def scan(page) -> list[Field]:
         for r in raw:
             fields.append(Field(frame=i, **r))
     # Some boards have a "upload to autofill" box separate from the real resume field; don't touch it.
-    return [f for f in fields if (f.label or f.kind == "file") and "autofill" not in f.label.lower()]
+    # Honeypots ("for robots only, leave blank") flag you as a bot if filled.
+    return [f for f in fields if (f.label or f.kind == "file") and "autofill" not in f.label.lower()
+            and not HONEYPOT_RE.search(f.label)]
+
+
+HONEYPOT_RE = re.compile(r"robots? only|if you(?:'| a)re (?:a )?human|leave (?:this )?(?:field )?(?:blank|empty)"
+                         r"|do not (?:fill|enter|complete) (?:this|if)", re.I)
 
 
 def read_values(page) -> dict[str, object]:

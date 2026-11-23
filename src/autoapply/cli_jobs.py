@@ -16,6 +16,7 @@ from rich.text import Text
 from sqlmodel import col, func, select
 
 from . import config, db, sources
+from .apply import sites
 from .jobs import presets
 from .jobs import profile as profile_mod
 from .jobs.rank import score
@@ -238,7 +239,7 @@ def run_search(f: Filters, label: str) -> None:
     if len(arranged) > 30:
         console.print(f"[dim]…{len(arranged) - 30} more: `jobs`[/dim]")
     console.print("[dim]`use <id>` then `info` / `open` / `save`. Listings credited to remoteok.com and "
-                  "SimplifyJobs (github.com/SimplifyJobs). [yellow]manual[/yellow] = AutoApply can't fill that site yet.[/dim]")
+                  "SimplifyJobs (github.com/SimplifyJobs). [yellow]best effort[/yellow] = AutoApply fills what it recognizes; you do the rest.[/dim]")
     if not prof:
         console.print("[dim]Import your resume (`resume import <pdf>`) to rank results by how well they match you.[/dim]")
 
@@ -283,12 +284,6 @@ def search(
 # ---------------------------------------------------------------------------
 # jobs list
 # ---------------------------------------------------------------------------
-
-
-AUTOFILL = {"greenhouse", "lever", "ashby"}  # sites the form filler supports
-SITE_NAMES = {"greenhouse": "Greenhouse", "lever": "Lever", "ashby": "Ashby", "remoteok": "Remote OK",
-              "workday": "Workday", "icims": "iCIMS", "smartrecruiters": "SmartRecruiters",
-              "workable": "Workable", "jobvite": "Jobvite", "web": "company site"}
 
 
 def _row(j: Job, new: bool = False) -> dict:
@@ -343,8 +338,9 @@ def _table(rows: list[dict], title: str, show_status: bool = False, show_skills:
             title.append(f" (+{n} more location{'s' if n > 1 else ''})", style="dim")
         if r.get("new"):
             title.append(" new", style="bold green")
-        if r["source"] not in AUTOFILL and r["source"] != "remoteok":
-            title.append(f" · {SITE_NAMES.get(r['source'], r['source'])} (manual)", style="yellow")
+        site, full = sites.describe(r["source"])
+        if not full and r["source"] != "remoteok":
+            title.append(f" · {site} (best effort)", style="yellow")
         cells = [str(r["id"]), _match_text(r["match"]), Text(company), title, loc_text, _ago(r["posted"])]
         if show_skills:
             cells.append(Text(r["skills"] or ""))
@@ -416,8 +412,8 @@ def job_show(
     meta.add_column()
     for label, value in [
         ("Company", job.company + (" (via Remote OK)" if job.source == "remoteok" else "")),
-        ("Applies on", SITE_NAMES.get(job.source, job.source)
-         + ("" if job.source in AUTOFILL else " (AutoApply can't fill this site yet)")),
+        ("Applies on", (lambda d: d[0] + ("" if d[1] else " (best effort: AutoApply fills what it recognizes)"))(
+            sites.describe(job.source))),
         ("Location", (job.location or "-") + ("  (remote)" if job.remote else "")),
         ("Match", f"{job.match_score}% like your resume" if job.match_score is not None else None),
         ("Your skills", job.matched_skills),
