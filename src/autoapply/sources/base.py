@@ -5,9 +5,13 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -25,7 +29,7 @@ class NotFound(SourceError):
 
 @dataclass
 class RawJob:
-    source: str  # greenhouse / lever / ashby
+    source: str  # greenhouse / lever / ashby / workday / … (see sources.ALL)
     company_slug: str
     external_id: str
     company: str
@@ -51,23 +55,117 @@ class RawJob:
         return " | ".join(dict.fromkeys([x for x in [self.location, *self.locations] if x]))
 
 
+class Listing(list):
+    """A fetch result. ``complete`` is False when it's a search or capped, not the whole board,
+    so jobs missing from it mustn't be marked closed."""
+
+    complete: bool = True
+
+
 def client() -> httpx.Client:
     return httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT, follow_redirects=True)
 
 
-def get_json(http: httpx.Client, url: str, params: dict | None = None):
+# ---------------------------------------------------------------------------
+# politeness: per-host spacing + concurrency, and backing off when asked to
+# ---------------------------------------------------------------------------
+
+MIN_INTERVAL_S = 0.35  # minimum gap between two requests to the same host group
+PER_HOST_CONCURRENCY = 2  # parallel requests per host group
+MAX_RETRY_AFTER_S = 30.0  # longest Retry-After we'll honour before giving up on a board
+
+
+class _HostGate:
+    def __init__(self):
+        self.sem = threading.BoundedSemaphore(PER_HOST_CONCURRENCY)
+        self.lock = threading.Lock()
+        self.next_at = 0.0
+
+
+_gates: dict[str, _HostGate] = {}
+_gates_lock = threading.Lock()
+
+
+def host_group(url: str) -> str:
+    """Requests to hosts that share infrastructure are paced together.
+
+    Workday tenants (acme.wd5.myworkdayjobs.com) share the wd5 cluster, so they're grouped by
+    cluster; Oracle by region pod; everything else by hostname.
+    """
+    host = (urlsplit(url).hostname or "").lower()
+    labels = host.split(".")
+    if host.endswith((".myworkdayjobs.com", ".myworkdaysite.com")) and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    if host.endswith(".oraclecloud.com") and len(labels) >= 4:
+        return ".".join(labels[-4:])
+    if host.endswith(".bamboohr.com"):
+        return "bamboohr.com"
+    return host
+
+
+@contextmanager
+def polite(url: str):
+    """Hold a per-host-group slot and wait out the minimum spacing before a request."""
+    with _gates_lock:
+        gate = _gates.setdefault(host_group(url), _HostGate())
+    with gate.sem:
+        with gate.lock:
+            wait = gate.next_at - time.monotonic()
+            gate.next_at = max(gate.next_at, time.monotonic()) + MIN_INTERVAL_S
+        if wait > 0:
+            time.sleep(wait)
+        yield
+
+
+def _retry_after(r: httpx.Response) -> float | None:
+    value = r.headers.get("Retry-After")
+    if value is None:
+        return 5.0
     try:
-        r = http.get(url, params=params)
-    except httpx.HTTPError as e:
-        raise SourceError(f"network error: {e}") from e
+        return float(value)
+    except ValueError:
+        return None
+
+
+def request(http: httpx.Client, method: str, url: str, **kwargs) -> httpx.Response:
+    """One polite request. A 429/503 is retried once after Retry-After (if it's short)."""
+    for attempt in range(2):
+        try:
+            with polite(url):
+                r = http.request(method, url, **kwargs)
+        except httpx.HTTPError as e:
+            raise SourceError(f"network error: {e}") from e
+        if r.status_code in (429, 503) and attempt == 0:
+            delay = _retry_after(r)
+            if delay is not None and delay <= MAX_RETRY_AFTER_S:
+                time.sleep(delay)
+                continue
+            raise SourceError(f"HTTP {r.status_code} from {url} (rate limited; try again later)")
+        break
     if r.status_code == 404:
         raise NotFound(url)
     if r.status_code >= 400:
         raise SourceError(f"HTTP {r.status_code} from {url}")
+    return r
+
+
+def _json(r: httpx.Response, url: str):
     try:
-        data = r.json()
+        return r.json()
     except ValueError as e:
         raise SourceError(f"invalid JSON from {url}") from e
+
+
+def get_text(http: httpx.Client, url: str, params: dict | None = None) -> str:
+    return request(http, "GET", url, params=params).text
+
+
+def post_json(http: httpx.Client, url: str, body: dict, headers: dict | None = None):
+    return _json(request(http, "POST", url, json=body, headers=headers), url)
+
+
+def get_json(http: httpx.Client, url: str, params: dict | None = None):
+    data = _json(request(http, "GET", url, params=params), url)
     # Lever answers unknown companies with 200 + {"ok": false} on some endpoints.
     if isinstance(data, dict) and data.get("ok") is False:
         raise NotFound(url)

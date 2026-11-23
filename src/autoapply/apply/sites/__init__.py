@@ -157,7 +157,8 @@ class Ashby(Site):
 
 ADAPTERS: dict[str, Site] = {s.name: s for s in (Greenhouse(), Lever(), Ashby())}
 LABELS = {"workday": "Workday", "icims": "iCIMS", "smartrecruiters": "SmartRecruiters", "workable": "Workable",
-          "jobvite": "Jobvite", "remoteok": "Remote OK", "web": "company site"}
+          "jobvite": "Jobvite", "bamboohr": "BambooHR", "oracle": "Oracle Cloud", "remoteok": "Remote OK",
+          "keryx": "company site", "github": "company site", "web": "company site"}
 
 
 def for_job(job: Job) -> Site:

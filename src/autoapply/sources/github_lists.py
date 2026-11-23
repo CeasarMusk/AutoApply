@@ -154,6 +154,6 @@ def to_raw(x: dict) -> RawJob:
     )
 
 
-def fetch(http: httpx.Client, slug: str = "all") -> list[RawJob]:
+def fetch(http: httpx.Client, slug: str = "all", query: tuple[str, ...] = ()) -> list[RawJob]:
     """Every listing. fetch_all drops the ones whose board it fetched directly (those have full descriptions)."""
     return [to_raw(x) for x in listings(http)]

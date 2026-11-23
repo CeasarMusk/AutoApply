@@ -10,7 +10,7 @@ NAME = "ashby"
 BASE = "https://api.ashbyhq.com/posting-api/job-board"
 
 
-def fetch(http: httpx.Client, slug: str) -> list[RawJob]:
+def fetch(http: httpx.Client, slug: str, query: tuple[str, ...] = ()) -> list[RawJob]:
     data = get_json(http, f"{BASE}/{slug}", params={"includeCompensation": "true"})
     jobs: list[RawJob] = []
     for j in data.get("jobs", []):
@@ -41,3 +41,11 @@ def fetch(http: httpx.Client, slug: str) -> list[RawJob]:
             )
         )
     return jobs
+
+
+def detail(http: httpx.Client, slug: str, external_id: str) -> str:
+    # Ashby has no single-posting endpoint; the board call includes every description.
+    for j in fetch(http, slug):
+        if j.external_id == external_id:
+            return j.description
+    return ""

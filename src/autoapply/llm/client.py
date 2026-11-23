@@ -1,18 +1,21 @@
-"""One entry point (`LLM.parse`) for every AI step, with two interchangeable backends.
+"""One entry point (`LLM.parse`) for every AI step, with three interchangeable backends.
 
 - ``claude-code`` (default): runs Claude Code headless (``claude -p``), so calls use your
   Claude Pro/Max subscription instead of paid API tokens. For personal use on your own
   machine; tools shared with other people should use their own API keys.
 - ``api``: the Anthropic API via the official SDK (pay per token). Adds refusal fallbacks
   and prompt caching.
+- ``ollama``: a model running locally in Ollama (free and private; weaker, so its output goes
+  through the same validation and fact guards).
 
-Both return a validated pydantic object and log token usage to sqlite.
+All return a validated pydantic object and log token usage to sqlite.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -20,6 +23,7 @@ from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 import anthropic
+import httpx
 from pydantic import BaseModel, ValidationError
 
 from .. import config
@@ -231,8 +235,190 @@ class ApiBackend:
 
 
 # ---------------------------------------------------------------------------
+# Ollama (local models)
+# ---------------------------------------------------------------------------
+
+OLLAMA_DEFAULT_HOST = "http://localhost:11434"
+OLLAMA_TIMEOUT_S = 900  # local models on modest hardware can take minutes on a long resume
+
+
+def ollama_host(configured: str = "") -> str:
+    host = (configured or os.environ.get("OLLAMA_HOST") or OLLAMA_DEFAULT_HOST).strip().rstrip("/")
+    if "://" not in host:
+        host = f"http://{host}"
+    return host
+
+
+def ollama_models(host: str = "", http: Any | None = None) -> list[str]:
+    """Names of the models installed in Ollama (raises LLMError if it isn't running)."""
+    url = f"{ollama_host(host)}/api/tags"
+    try:
+        r = (http or httpx).get(url, timeout=5)
+        r.raise_for_status()
+    except httpx.HTTPError as e:
+        raise LLMError(f"Ollama isn't reachable at {ollama_host(host)}. Start it with `ollama serve`. ({e})") from e
+    return [m.get("name") or m.get("model") for m in r.json().get("models") or []]
+
+
+class OllamaBackend:
+    """A model served by a local Ollama. Uses Ollama's JSON-schema structured outputs.
+
+    Local models are weaker than Claude, so the schema is also spelled out in the system prompt,
+    and an answer that doesn't validate gets one retry with the error. Every guard that keeps
+    tailoring and essays honest (tailor.check_rewrite, id-based picking) runs after this, the same
+    as with Claude.
+    """
+
+    def __init__(self, model: str = "", host: str = "", num_ctx: int = 16384, think: bool = False,
+                 http: Any | None = None):
+        self.model = model
+        self.host = ollama_host(host)
+        self.num_ctx = num_ctx
+        self.think = think
+        self._http = http
+        self._caps: dict[str, list[str]] = {}
+
+    @property
+    def http(self) -> Any:
+        if self._http is None:
+            self._http = httpx.Client(timeout=httpx.Timeout(OLLAMA_TIMEOUT_S, connect=5.0))
+        return self._http
+
+    def _model(self) -> str:
+        if not self.model:
+            models = ollama_models(self.host, self.http)
+            if not models:
+                raise LLMError("Ollama has no models installed. Run e.g. `ollama pull qwen3:14b`.")
+            self.model = models[0]
+        return self.model
+
+    def _capabilities(self, model: str) -> list[str]:
+        if model not in self._caps:
+            try:
+                r = self.http.post(f"{self.host}/api/show", json={"model": model})
+                self._caps[model] = (r.json().get("capabilities") or []) if r.status_code == 200 else []
+            except (httpx.HTTPError, ValueError):
+                self._caps[model] = []
+        return self._caps[model]
+
+    def _think_value(self, model: str, effort: str) -> bool | str | None:
+        if "thinking" not in self._capabilities(model):
+            return None  # sending `think` to a model without it is an error
+        if model.startswith("gpt-oss"):
+            # gpt-oss always reasons; it takes a level instead of on/off.
+            if not self.think:
+                return "low"
+            return {"low": "low", "medium": "medium"}.get(effort, "high")
+        return self.think
+
+    @staticmethod
+    def _prompt(content: str | list[dict[str, Any]]) -> str:
+        if isinstance(content, str):
+            return content
+        parts: list[str] = []
+        for block in content:
+            if block.get("type") == "text":
+                parts.append(block["text"])
+            elif block.get("type") == "document" and block["source"].get("type") == "base64":
+                parts.append(f"<document>\n{_pdf_text(block['source']['data'])}\n</document>")
+            else:
+                raise LLMError(f"Unsupported content block for Ollama: {block.get('type')}")
+        return "\n\n".join(parts)
+
+    def parse(self, *, task, system, content, output_format, effort="high", max_tokens=16000):
+        model = self._model()
+        schema = output_format.model_json_schema()
+        sys_prompt = (
+            f"{system}\n\nReply with a single JSON object that matches this JSON schema, and nothing else:\n"
+            f"{json.dumps(schema)}"
+        )
+        messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": self._prompt(content)}]
+        body: dict[str, Any] = {
+            "model": model, "messages": messages, "stream": False, "format": schema,
+            "options": {"num_ctx": self.num_ctx, "num_predict": max_tokens, "temperature": 0.2},
+        }
+        think = self._think_value(model, effort)
+        if think is not None:
+            body["think"] = think
+
+        last_error = ""
+        for attempt in range(2):
+            data = self._chat(task, body)
+            text = ((data.get("message") or {}).get("content") or "").strip()
+            _log_usage(task, f"ollama:{model}", data.get("prompt_eval_count") or 0, data.get("eval_count") or 0, 0, 0)
+            if data.get("done_reason") == "length":
+                raise LLMError(f"The {task} response was cut off (num_predict={max_tokens}); "
+                               f"try a larger OLLAMA_CTX or a shorter input.")
+            try:
+                return output_format.model_validate_json(_strip_fences(text))
+            except ValidationError as e:
+                last_error = str(e)
+                if attempt == 0:
+                    body["messages"] = messages + [
+                        {"role": "assistant", "content": text[:4000]},
+                        {"role": "user", "content": "That JSON didn't match the schema:\n"
+                                                    f"{last_error[:2000]}\nReply again with corrected JSON only."},
+                    ]
+        raise LLMError(f"The local model's {task} answer didn't match the expected format: {last_error[:500]}")
+
+    def _chat(self, task: str, body: dict) -> dict:
+        url = f"{self.host}/api/chat"
+        try:
+            r = self.http.post(url, json=body)
+        except httpx.TimeoutException as e:
+            raise LLMError(f"Ollama took longer than {OLLAMA_TIMEOUT_S}s on {task}.") from e
+        except httpx.HTTPError as e:
+            raise LLMError(f"Ollama isn't reachable at {self.host}. Start it with `ollama serve`. ({e})") from e
+        if r.status_code == 404:
+            raise LLMError(f"Ollama doesn't have the model '{body['model']}'. Run `ollama pull {body['model']}`, "
+                           "or `set OLLAMA_MODEL` to one from `ollama list`.")
+        if r.status_code >= 400:
+            try:
+                msg = r.json().get("error") or r.text
+            except ValueError:
+                msg = r.text
+            raise LLMError(f"Ollama error on {task}: {msg[:300]}")
+        try:
+            return r.json()
+        except ValueError as e:
+            raise LLMError(f"Ollama returned something that isn't JSON on {task}.") from e
+
+
+def _strip_fences(text: str) -> str:
+    """Some models wrap JSON in ```json fences even in format mode."""
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        text = text.rsplit("```", 1)[0]
+    return text.strip()
+
+
+def _pdf_text(b64: str) -> str:
+    import io
+
+    from pypdf import PdfReader
+
+    try:
+        reader = PdfReader(io.BytesIO(base64.standard_b64decode(b64)))
+        text = "\n\n".join((p.extract_text() or "") for p in reader.pages).strip()
+    except Exception as e:  # pypdf raises many types on odd files
+        raise LLMError(f"Couldn't read the PDF's text for the local model: {e}") from e
+    if len(text) < 50:
+        raise LLMError("This PDF has no extractable text (scanned?). Local models can't read images; "
+                       "export a text PDF or use the Claude backend.")
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Facade
 # ---------------------------------------------------------------------------
+
+
+def backend_label() -> str:
+    """Short name of the configured AI, for status messages ("Tailoring … with <label>")."""
+    cfg = config.load_config()
+    if cfg.llm_backend == "ollama":
+        return f"{cfg.ollama_model or 'a local model'} (Ollama)"
+    return "Claude"
 
 
 class LLM:
@@ -241,6 +427,9 @@ class LLM:
         cfg = config.load_config()
         if backend is not None:
             self.backend = backend
+        elif client is None and cfg.llm_backend == "ollama":
+            self.backend = OllamaBackend(model or cfg.ollama_model, cfg.ollama_host,
+                                         num_ctx=cfg.ollama_num_ctx, think=cfg.ollama_think)
         elif client is not None or cfg.llm_backend == "api":
             self.backend = ApiBackend(model or cfg.model, client)
         else:

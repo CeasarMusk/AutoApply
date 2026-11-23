@@ -20,7 +20,7 @@ def _description(j: dict) -> str:
     return "\n\n".join(p.strip() for p in parts if p and p.strip())
 
 
-def fetch(http: httpx.Client, slug: str) -> list[RawJob]:
+def fetch(http: httpx.Client, slug: str, query: tuple[str, ...] = ()) -> list[RawJob]:
     data = get_json(http, f"{BASE}/{slug}", params={"mode": "json"})
     jobs: list[RawJob] = []
     for j in data if isinstance(data, list) else []:
@@ -53,3 +53,7 @@ def fetch(http: httpx.Client, slug: str) -> list[RawJob]:
             )
         )
     return jobs
+
+
+def detail(http: httpx.Client, slug: str, external_id: str) -> str:
+    return _description(get_json(http, f"{BASE}/{slug}/{external_id}") or {})

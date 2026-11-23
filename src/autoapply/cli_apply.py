@@ -16,6 +16,7 @@ from rich.text import Text
 from . import config, db
 from .apply import runner, sites
 from .apply.answers import STANDARD, AnswerStore, ResumeFacts, describe
+from .jobs import details
 from .models import Job
 from .resume import store as resume_store
 
@@ -84,9 +85,21 @@ def _show_tailored(t, master, fresh: bool) -> None:
     console.print(Panel("\n".join(lines), title="Tailored resume", title_align="left", expand=True))
 
 
+def with_description(job: Job) -> Job:
+    """Make sure the job has its posting text (Keryx/Workday listings arrive without it)."""
+    if not details.needs_description(job):
+        return job
+    with console.status("Fetching the job posting…"):
+        job, err = details.ensure_description(job)
+    if err:
+        console.print(f"[yellow]Couldn't fetch the job description ({esc(err)}); "
+                      "tailoring and essays will only see the title.[/yellow]")
+    return job
+
+
 def make_tailored(job: Job, master, *, redo: bool = False) -> Path | None:
     """Tailor (or reuse the earlier tailoring for) this job. Returns the PDF, or None if it failed."""
-    from .llm import LLMError
+    from .llm import LLMError, backend_label
     from .resume import render, tailor
 
     pdf, meta = _tailor_paths(job, master)
@@ -99,8 +112,9 @@ def make_tailored(job: Job, master, *, redo: bool = False) -> Path | None:
             return pdf
         except Exception:
             pass
+    job = with_description(job)
     try:
-        with console.status(f"Tailoring your resume for {esc(job.company)} with Claude…"):
+        with console.status(f"Tailoring your resume for {esc(job.company)} with {backend_label()}…"):
             t = tailor.tailor(master, job)
         with console.status("Laying it out on one page…"):
             render.render_pdf(t, pdf)
@@ -184,13 +198,30 @@ def apply(
         job = s.get(Job, job_id)
     if job is None:
         _fail(f"No job with id {job_id}.")
+    if job.status == "applied" and not dry_run and not questionary.confirm(
+            "You already applied to this one. Open it anyway?", default=False).ask():
+        return
+    outcome = apply_one(job, dry_run=dry_run, no_ai=no_ai, no_tailor=no_tailor, headless=headless)
+    if outcome.startswith("error:"):
+        _fail(outcome.removeprefix("error:"))
+
+
+def mark_applied_externally(job: Job) -> None:
+    """Record an application the user made outside AutoApply's browser."""
+    runner.record(job, runner.Result(url=job.apply_url or job.url, submitted=True), None)
+
+
+def apply_one(job: Job, *, dry_run: bool = False, no_ai: bool = False, no_tailor: bool = False,
+              headless: bool = False, ask_external: bool = False) -> str:
+    """Fill one application. Returns "applied", "not_submitted", "dry_run" or "error:<why>".
+
+    Every site is filled (Greenhouse/Lever/Ashby fully, others best effort via apply.sites);
+    ask_external is kept for callers like `queue run` and currently has no effect.
+    """
     site = sites.for_job(job)
     if not site.full_support:
         console.print(f"[yellow]{esc(job.company)}'s application is on {esc(site.label)}. AutoApply fills what it "
                       f"recognizes there (best effort); finish the rest in the browser.[/yellow]")
-    if job.status == "applied" and not dry_run and not questionary.confirm(
-            "You already applied to this one. Open it anyway?", default=False).ask():
-        return
     cfg = config.load_config()
     try:
         resume = resume_store.load()
@@ -198,6 +229,7 @@ def apply(
         resume = None
         console.print("[yellow]No master resume, so contact details can't be filled automatically.[/yellow]")
     resume_file = _resume_file(cfg)
+    job = with_description(job)  # tailoring and essays need the posting text
     if resume and cfg.tailor_resume and not no_tailor:
         resume_file = choose_resume(job, resume, resume_file, interactive=not dry_run)
     shot = config.output_dir() / f"dry-run-{job.id}.png" if dry_run else None
@@ -209,18 +241,19 @@ def apply(
                             use_ai=cfg.ai_essays and not no_ai, screenshot=shot,
                             transcript_file=runner.saved_transcript(cfg), ask_optional=cfg.ask_optional)
     except Exception as e:
-        msg = str(e).splitlines()[0]
+        msg = str(e).splitlines()[0] if str(e) else type(e).__name__
         if "Executable doesn't exist" in msg or "playwright install" in msg:
-            _fail("The browser isn't installed yet. Run: uv run playwright install chromium")
-        _fail(f"Couldn't run the application: {msg}")
+            return "error:The browser isn't installed yet. Run: uv run playwright install chromium"
+        return f"error:Couldn't run the application: {msg}"
     if dry_run:
         console.print(f"[dim]Dry run: nothing was submitted. Screenshot: {shot}[/dim]")
-        return
+        return "dry_run"
     runner.record(job, result, resume_file)
     if result.submitted:
         console.print(f"[green]✓ Marked as applied.[/green] {esc(job.title)} @ {esc(job.company)}")
-    else:
-        console.print("Not marked as applied.")
+        return "applied"
+    console.print("Not marked as applied.")
+    return "not_submitted"
 
 
 # ---------------------------------------------------------------------------

@@ -17,8 +17,9 @@ from sqlmodel import col, func, select
 
 from . import config, db, sources
 from .apply import sites
-from .jobs import presets
+from .jobs import details, presets
 from .jobs import profile as profile_mod
+from .jobs import queue as queue_mod
 from .jobs.rank import score
 from .jobs.search import Filters, matches, store
 from .models import Job
@@ -28,6 +29,7 @@ console = Console()
 
 companies_app = typer.Typer(help="Extra companies to search (on top of the built-in list).", no_args_is_help=True)
 job_app = typer.Typer(help="Look at or act on one job.", no_args_is_help=True)
+keryx_app = typer.Typer(help="Keryx's offline list of US internships and new-grad roles.", no_args_is_help=True)
 
 STATUSES = ["new", "seen", "saved", "ignored", "applied", "closed"]
 STATUS_STYLE = {"new": "bold green", "saved": "yellow", "applied": "cyan", "ignored": "dim", "closed": "dim strike"}
@@ -195,16 +197,46 @@ def _sort_key(j: Job):
     return (j.match_score if j.match_score is not None else -1, posted)
 
 
+def _keryx_jobs(cfg, status) -> list:
+    """Keryx's offline list, re-downloaded first if it's older than keryx_sync_hours."""
+    if not cfg.use_keryx:
+        return []
+    if sources.keryx.sync_due(cfg.keryx_sync_hours):
+        status.update("Updating the Keryx internship / new-grad list…")
+        try:
+            sources.keryx.sync()
+        except sources.SourceError as e:
+            console.print(f"[yellow]![/yellow] Keryx update failed, using the copy on disk ({esc(str(e))})", highlight=False)
+    return sources.keryx.load()
+
+
 def run_search(f: Filters, label: str) -> None:
     cfg = config.load_config()
     targets = sources.search_targets(cfg)
-    if not targets:
-        _fail("Nothing to search: the built-in list is off and you haven't added companies.")
+    if not targets and not cfg.use_keryx:
+        _fail("Nothing to search: the built-in list and Keryx are off and you haven't added companies.")
 
     console.print(f"[bold]Searching:[/bold] {esc(label)}")
-    with console.status(f"Fetching {len(targets)} job boards…") as status:
-        report = sources.fetch_all(targets, progress=lambda d, n: status.update(f"Fetching job boards… {d}/{n}"))
-    hits = [j for j in report.jobs if matches(j, f)]
+    # Boards with a search box (Workday, Oracle, SmartRecruiters) get asked for these terms.
+    query = tuple(f.keywords or f.require)
+    with console.status("Loading job lists…") as status:
+        offline = [j for j in _keryx_jobs(cfg, status) if matches(j, f)]
+        n_live = 0
+        if cfg.use_keryx and cfg.keryx_live:
+            extra = sources.keryx.live_targets(offline, cfg.keryx_live_max_boards, skip=targets)
+            n_live = len(extra)
+            targets = targets + extra
+        status.update(f"Fetching {len(targets)} job boards…")
+        report = sources.fetch_all(targets, query=query, cache_minutes=cfg.board_cache_minutes,
+                                   progress=lambda d, n: status.update(f"Fetching job boards… {d}/{n}"))
+    sources.prune_cache()
+    live_hits = [j for j in report.jobs if matches(j, f)]
+    # A Keryx row for a board we just read in full that no longer lists it has closed since.
+    offline = [j for j in offline
+               if (j.source, j.company_slug) not in report.fetched_keys
+               or j.dedupe_key in report.fetched_keys[(j.source, j.company_slug)]]
+    hits = live_hits + offline  # live first: it wins when both have the same job
+    scanned = len(report.jobs) + (len(sources.keryx.load()) if cfg.use_keryx else 0)
 
     prof = _ranking_profile()
     scores = {}
@@ -220,6 +252,7 @@ def run_search(f: Filters, label: str) -> None:
         rows = sorted(rows, key=_sort_key, reverse=True)
         new_ids = {j.id for j in result.new}
         arranged = arrange([_row(j, new=j.id in new_ids) for j in rows])
+        queue_mod.remember_results([j.id for j in rows], label)
         table_rows = arranged[:30]
 
     errors = list(report.errors.items())
@@ -227,9 +260,12 @@ def run_search(f: Filters, label: str) -> None:
         console.print(f"[yellow]![/yellow] {esc(key)}: {esc(err)}", highlight=False)
     if len(errors) > 5:
         console.print(f"[yellow]![/yellow] …and {len(errors) - 5} more boards couldn't be fetched.", highlight=False)
+    boards = f"{len(report.per_company)} boards" + (f" ({report.cached} cached)" if report.cached else "")
+    if cfg.use_keryx:
+        boards += f" + Keryx's offline list" + (f", {n_live} of its boards checked live" if n_live else "")
     console.print(
-        f"Scanned [bold]{len(report.jobs):,}[/bold] jobs on {len(report.per_company)} boards → "
-        f"[bold]{len(hits)}[/bold] match ([green]{len(result.new)} new[/green])"
+        f"Scanned [bold]{scanned:,}[/bold] jobs on {boards} → "
+        f"[bold]{len(result.new) + result.updated}[/bold] match ([green]{len(result.new)} new[/green])"
         + (f", {result.closed} saved jobs no longer posted" if result.closed else "") + "."
     )
     if not table_rows:
@@ -238,8 +274,10 @@ def run_search(f: Filters, label: str) -> None:
     console.print(_table(table_rows, "Best matches" if prof else "Matches", show_skills=bool(prof)))
     if len(arranged) > 30:
         console.print(f"[dim]…{len(arranged) - 30} more: `jobs`[/dim]")
-    console.print("[dim]`use <id>` then `info` / `open` / `save`. Listings credited to remoteok.com and "
-                  "SimplifyJobs (github.com/SimplifyJobs). [yellow]best effort[/yellow] = AutoApply fills what it recognizes; you do the rest.[/dim]")
+    console.print("[dim]`queue build` lines these up to apply to one after another, best match or newest first.[/dim]")
+    console.print("[dim]`use <id>` then `info` / `open` / `save`. Listings credited to remoteok.com, "
+                  "SimplifyJobs (github.com/SimplifyJobs) and Keryx (github.com/GodlyDonuts/keryx). "
+                  "[yellow]best effort[/yellow] = AutoApply fills what it recognizes; you do the rest.[/dim]")
     if not prof:
         console.print("[dim]Import your resume (`resume import <pdf>`) to rank results by how well they match you.[/dim]")
 
@@ -405,6 +443,11 @@ def job_show(
 ) -> None:
     """Show a job's details and description."""
     job = _get_job(job_id)
+    if details.needs_description(job):
+        with console.status("Fetching the posting…"):
+            job, err = details.ensure_description(job)
+        if err:
+            console.print(f"[dim]Couldn't fetch the description ({esc(err)}); `open` shows it in your browser.[/dim]")
     if job.status == "new":
         _set_status(job_id, "seen")
     meta = Table.grid(padding=(0, 2))
@@ -412,8 +455,9 @@ def job_show(
     meta.add_column()
     for label, value in [
         ("Company", job.company + (" (via Remote OK)" if job.source == "remoteok" else "")),
-        ("Applies on", (lambda d: d[0] + ("" if d[1] else " (best effort: AutoApply fills what it recognizes)"))(
-            sites.describe(job.source))),
+        ("Board", job.source if job.source not in ("remoteok", "keryx", "github") else None),
+        ("Applies on", (lambda st: st.label + ("" if st.full_support else " (best effort: AutoApply fills what it recognizes)"))(
+            sites.for_job(job))),
         ("Location", (job.location or "-") + ("  (remote)" if job.remote else "")),
         ("Match", f"{job.match_score}% like your resume" if job.match_score is not None else None),
         ("Your skills", job.matched_skills),
@@ -465,16 +509,38 @@ job_app.command("reset")(_status_cmd("seen", "Clear a saved/ignored mark."))
 
 
 @companies_app.command("add")
-def companies_add(slugs: list[str] = typer.Argument(..., help="Board slugs from the company's job-board URL")) -> None:
-    """Add companies to search. Detects whether each uses Greenhouse, Lever or Ashby."""
+def companies_add(slugs: list[str] = typer.Argument(..., help="Board slugs, or links to a company's careers board")) -> None:
+    """Add companies to search.
+
+    A slug (e.g. stripe) is looked up on Greenhouse, Lever and Ashby. A careers-board link also
+    works for SmartRecruiters, Workable, BambooHR, Workday and Oracle, e.g.
+    https://acme.wd5.myworkdayjobs.com/External
+    """
     cfg = config.load_config()
     for raw in slugs:
+        if "://" in raw:
+            ref = sources.urls.parse(raw)
+            if ref is None:
+                console.print(f"[red]✗[/red] {esc(raw)}: not a job board AutoApply can read "
+                              f"({', '.join(sources.ATS)})")
+                continue
+            with console.status(f"Checking {ref.ats} board {ref.slug}…"):
+                try:
+                    found = sources.fetch_company(ref.ats, ref.slug)
+                    n = f"{len(found)}{'' if getattr(found, 'complete', True) else '+'}"
+                except sources.SourceError as e:
+                    console.print(f"[red]✗[/red] {esc(ref.slug)} ({ref.ats}): {esc(str(e))}")
+                    continue
+            added = cfg.companies.add(ref.ats, ref.slug)
+            console.print(f"[green]✓[/green] {esc(ref.slug)}: {ref.ats}, {n} open jobs — {'added' if added else 'already added'}")
+            continue
         slug = raw.strip().lower()
         with console.status(f"Looking for {slug}…"):
             found = sources.detect(slug)
         if not found:
             console.print(f"[red]✗[/red] {esc(slug)}: not found on Greenhouse, Lever or Ashby "
-                          "(use the name from boards.greenhouse.io/<slug>, jobs.lever.co/<slug>, jobs.ashbyhq.com/<slug>)")
+                          "(use the name from boards.greenhouse.io/<slug>, jobs.lever.co/<slug>, jobs.ashbyhq.com/<slug>, "
+                          "or paste the careers-board link)")
             continue
         best_ats, n = max(found, key=lambda x: x[1])
         added = cfg.companies.add(best_ats, slug)
@@ -487,10 +553,11 @@ def companies_list() -> None:
     """Show which job boards a search covers."""
     cfg = config.load_config()
     mine = cfg.companies.pairs()
-    console.print(f"Built-in list: {'[green]on[/green]' if cfg.use_starter_companies else '[red]off[/red]'} "
-                  f"({len(sources.starter.pairs())} companies)   Remote OK: "
-                  f"{'[green]on[/green]' if cfg.use_remoteok else '[red]off[/red]'}   GitHub lists: "
-                  f"{'[green]on[/green]' if cfg.use_github_lists else '[red]off[/red]'}")
+    on = lambda b: "[green]on[/green]" if b else "[red]off[/red]"  # noqa: E731
+    console.print(f"Built-in list: {on(cfg.use_starter_companies)} ({len(sources.starter.pairs())} companies)   "
+                  f"Remote OK: {on(cfg.use_remoteok)}   GitHub lists: {on(cfg.use_github_lists)}   "
+                  f"Keryx: {on(cfg.use_keryx)} "
+                  f"({len(sources.keryx.boards()):,} boards; live checks {on(cfg.use_keryx and cfg.keryx_live)})")
     if cfg.use_starter_companies:
         console.print(Text(", ".join(sorted(s for _, s in sources.starter.pairs())), style="dim"))
     console.print(f"Your companies: {', '.join(f'{s} ({a})' for a, s in mine) if mine else 'none'}")
@@ -504,6 +571,37 @@ def companies_remove(slugs: list[str] = typer.Argument(...)) -> None:
         removed = cfg.companies.remove(slug.lower())
         console.print(f"Removed {esc(slug)}" if removed else f"[yellow]{esc(slug)} isn't one of your added companies[/yellow]")
     config.save_config(cfg)
+
+
+@keryx_app.command("status")
+def keryx_status() -> None:
+    """How fresh the offline Keryx list is."""
+    cfg = config.load_config()
+    st = sources.keryx.status()
+    when = st["fetched_at"] or "unknown"
+    console.print(f"Keryx list: [bold]{st['jobs']:,}[/bold] open internship / new-grad jobs from {st['boards']:,} boards "
+                  f"({'downloaded' if st['source'] == 'synced' else 'bundled with AutoApply'}, data from {esc(when)})")
+    if st["checked_at"]:
+        console.print(f"Last checked for updates: {st['checked_at']:%Y-%m-%d %H:%M} UTC")
+    console.print(f"Searches use it: {'yes' if cfg.use_keryx else 'no'} (`set KERYX`) · auto-update every "
+                  f"{cfg.keryx_sync_hours:g} h (`set KERYX_SYNC`) · live board checks: "
+                  f"{f'up to {cfg.keryx_live_max_boards} per search' if cfg.keryx_live else 'off'} (`set KERYX_LIVE`)")
+    console.print(f"[dim]Data: {sources.keryx.REPO} (MIT). Stored in {sources.keryx.local_dir()}[/dim]")
+
+
+@keryx_app.command("sync")
+def keryx_sync(force: bool = typer.Option(False, "--force", help="Download even if checked in the last 15 minutes.")) -> None:
+    """Download the latest Keryx list from GitHub (about 9 MB; skipped if unchanged)."""
+    with console.status("Downloading the Keryx list from GitHub…"):
+        try:
+            r = sources.keryx.sync(force=force)
+        except sources.SourceError as e:
+            _fail(f"Couldn't update the Keryx list: {e}")
+    if r["skipped"]:
+        console.print("[dim]Checked less than 15 minutes ago (Keryx refreshes every 15); use --force to re-download.[/dim]")
+    elif not r["changed"]:
+        console.print("Already up to date.")
+    console.print(f"Keryx list: [bold]{r['jobs']:,}[/bold] open jobs from {r['boards']:,} boards (data from {esc(r['fetched_at'] or '?')}).")
 
 
 def profile(refresh: bool = typer.Option(False, "--refresh", help="Rebuild it from the resume with AI.")) -> None:
@@ -527,6 +625,7 @@ def profile(refresh: bool = typer.Option(False, "--refresh", help="Rebuild it fr
 
 def register(app: typer.Typer) -> None:
     app.add_typer(companies_app, name="companies")
+    app.add_typer(keryx_app, name="keryx")
     app.add_typer(job_app, name="job")
     app.command("search")(search)
     app.command("jobs")(jobs)

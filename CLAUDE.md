@@ -12,16 +12,20 @@ in a Playwright browser. The user reviews and clicks Submit; the program never s
   (screenshot at `~/.autoapply/out/dry-run-<id>.png`; it's ~1280x6500, so crop it or check the summary table instead of reading it whole)
 
 ## Layout (src/autoapply/)
-- `cli.py`: root app, `init`, `resume ...` (import/build/edit/show/validate/transcript), `usage`
+- `cli.py`: root app, `init`, `resume ...` (import/build/edit/show/validate/transcript/github), `usage`
+- `cli_ai.py`: `ai` (provider status + picker, also used by `init`), `ai use <provider> [--model]`
+- `cli_queue.py`: `queue build/show/add/remove/clear/order/run` (apply queue; `run` calls `cli_apply.apply_one`)
 - `cli_jobs.py`: `search`, `jobs`, `job show/open/save/ignore/reset`, `companies`, `profile`
-- `cli_apply.py`: `apply`, `tailor`, `answers ...`; tailoring choice menu (use/preview/redo/original)
+- `cli_apply.py`: `apply` (wraps `apply_one`, which returns an outcome instead of exiting), `tailor`, `answers ...`; tailoring choice menu (use/preview/redo/original)
+- `picker.py`: searchable select/checkbox for long option lists (type to filter, ranked: "+1" → phone codes, "us"/"united" → United States, "austin tx" → "Austin, TX"; ↑/↓ moves, Tab checks in multi-select)
 - `shell.py`: interactive console: OPTIONS (`set X`), JOB_SHORTCUTS (`use <id>` then `apply`), HELP, banner
 - `config.py`: `~/.autoapply` paths (`AUTOAPPLY_HOME` overrides), `Config` model, `keep_document`
-- `models.py`: `MasterResume` (pydantic, stable ids) + sqlite tables `Job`, `Application`, `LLMUsage`
-- `llm/client.py`: `LLM.parse(task, system, content, output_format)` → validated pydantic object; backends `claude-code` (subscription via `claude -p`, default) and `api`
-- `sources/`: greenhouse, lever, ashby, remoteok fetchers; `starter.py` = built-in company list; `github_lists.py` = SimplifyJobs lists (adds their ATS boards to search + lists other sites as jobs, cached 1h in `~/.autoapply/cache`)
-- `jobs/`: `search.py` filters, `rank.py` local 0-100 match score (no AI), `profile.py` one cached AI call → search profile, `presets.py` search menu
-- `resume/`: `importer.py` (file → MasterResume via Claude), `store.py` (YAML + id assignment), `builder.py` (menu editor), `validate.py`, `review.py`, `tailor.py` (AI picks by id + rewrite guard), `render.py` (Jinja HTML → PDF via Chromium, fits one page)
+- `models.py`: `MasterResume` (pydantic, stable ids) + sqlite tables `Job`, `Application`, `QueueItem`, `LLMUsage`
+- `llm/client.py`: `LLM.parse(task, system, content, output_format)` → validated pydantic object; backends `claude-code` (subscription via `claude -p`, default), `api`, and `ollama` (local; JSON-schema `format`, PDFs → text, one retry on invalid JSON)
+- `sources/`: fetchers per ATS (greenhouse, lever, ashby, smartrecruiters, workable, bamboohr, workday, oracle) + feeds (remoteok; `github_lists.py` = SimplifyJobs lists: adds their ATS boards to search + lists other sites as jobs, cached 1h in `~/.autoapply/cache`), each with `fetch(http, slug, query=())` and `detail()`; `base.py` = polite requests (per-host spacing, 429 back-off), `Listing.complete`; `urls.py` = URL → (ats, slug, job id); `keryx.py` = offline internship/new-grad list (bundled in `sources/data/`, `keryx sync`, live board checks); `starter.py` = built-in company list
+- `jobs/details.py`: fetches a missing description on demand (Keryx/Workday listings have none)
+- `jobs/`: `queue.py` apply queue (`QueueItem` table; sources last/saved/all, orders match/recent; `search` saves its matches to `last_search.json`), `search.py` filters, `rank.py` local 0-100 match score (no AI), `profile.py` one cached AI call → search profile, `presets.py` search menu
+- `resume/`: `importer.py` (file → MasterResume via Claude), `store.py` (YAML + id assignment), `builder.py` (menu editor), `github.py` (profile → projects: basic = README summary/features, deep = languages + manifests + AI bullets checked with `tailor.check_rewrite` against the repo text), `validate.py`, `review.py`, `tailor.py` (AI picks by id + rewrite guard), `render.py` (Jinja HTML → PDF via Chromium, fits one page)
 - `apply/`: `scan.py` (JS form scanner → `Field`s; Greenhouse API enrichment), `fill.py` (fills one field per kind), `answers.py` (standard question keys, `AnswerStore`, `match_option`, `to_iso_date`), `runner.py` (`Applier`: plan → draft essays → ask unknowns → fill → summary → learn edits), `essay.py`
   - `apply/sites/`: per-site adapters (`for_job`): form URL, `prepare` (cookie banner, click "Apply"), `enrich`, `step_signature`. Greenhouse/Lever/Ashby are full support; every other site runs the generic adapter (best effort). `runner.wait_for_user` re-scans automatically when the step/URL/tab changes.
 
@@ -31,6 +35,9 @@ in a Playwright browser. The user reviews and clicks Submit; the program never s
 - Sensitive answers (work auth, sponsorship, EEO, salary: `answers.SENSITIVE`) are never guessed from the resume; only saved answers or the user.
 - Personal data lives in `~/.autoapply`, never in the repo.
 - Real-site checks: dry runs only. Ask before running real AI calls (tailor/essays) when a unit test would do.
+- Don't hammer job boards: go through `base.request` (spacing + back-off), keep live Keryx checks capped, and only
+  mark jobs closed from a `Listing` with `complete=True` (Workday/Oracle fetches are searches, never complete).
+- Refresh the bundled Keryx snapshot with `uv run python scripts/update_keryx_snapshot.py [keryx checkout]`.
 
 ## Gotchas learned on real forms
 - Ashby: inputs may have no id/name; multi-select checkboxes each get their own `name` (grouped by `-labeled-checkbox-N` id); required shown only via CSS; resume parsing can blank fields late (runner refills cleared fields).
