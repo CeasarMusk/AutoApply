@@ -11,8 +11,7 @@ from rich.table import Table
 from sqlmodel import func, select
 
 from . import config, db
-from .llm import LLM, LLMError, backend_label, ollama_models
-from .llm.client import ClaudeCodeBackend
+from .llm import LLM, LLMError, backend_label
 from .models import LLMUsage, MasterResume
 from .resume import builder, review, store, validate
 from .resume.importer import SUPPORTED, ImportError_, import_resume
@@ -107,38 +106,12 @@ def init() -> None:
     home = config.home()
     home.mkdir(parents=True, exist_ok=True)
     if not config.config_path().exists():
+        from .cli_ai import pick_provider
+
         cfg = config.Config()
-        has_cc = ClaudeCodeBackend.available()
-        try:
-            local_models = ollama_models()
-        except LLMError:
-            local_models = None
-        cfg.llm_backend = questionary.select(
-            "Which AI should AutoApply use?",
-            choices=[
-                questionary.Choice(
-                    "My Claude subscription, via Claude Code (no API cost)"
-                    + ("" if has_cc else "  [Claude Code not found]"),
-                    value="claude-code",
-                ),
-                questionary.Choice("Anthropic API key (pay per token)", value="api"),
-                questionary.Choice(
-                    "A local model in Ollama (free and private, but slower and less capable)"
-                    + ("" if local_models else "  [Ollama not running]" if local_models is None else "  [no models pulled]"),
-                    value="ollama",
-                ),
-            ],
-            default="claude-code" if has_cc else "api",
-        ).ask() or cfg.llm_backend
-        if cfg.llm_backend == "ollama" and local_models:
-            cfg.ollama_model = questionary.select("Which Ollama model?", choices=local_models).ask() or local_models[0]
+        pick_provider(cfg)
         config.save_config(cfg)
-        console.print(f"Created {config.config_path()}")
-        if cfg.llm_backend == "claude-code" and not has_cc:
-            console.print("[yellow]Install Claude Code and run `claude` once to log in before using AI features.[/yellow]")
-        if cfg.llm_backend == "ollama" and not local_models:
-            console.print("[yellow]Start Ollama and pull a model (e.g. `ollama pull qwen3:14b`), then "
-                          "`set OLLAMA_MODEL <name>` in the console.[/yellow]")
+        console.print(f"Created {config.config_path()} [dim](change the AI provider any time with `ai`)[/dim]")
     if not config.answers_path().exists():
         config.answers_path().write_text(config.DEFAULT_ANSWERS)
         console.print(f"Created {config.answers_path()} [dim](fill this in before applying)[/dim]")
@@ -252,6 +225,125 @@ def resume_show() -> None:
     review.show(console, r, validate.validate(r))
 
 
+@resume_app.command("github")
+def resume_github(
+    profile: str = typer.Argument(None, help="Your GitHub profile link (https://github.com/you) or username."),
+    deep: bool = typer.Option(False, "--deep", help="Also read languages and dependency files, and write bullets "
+                              "from each README with AI (fact-checked). Slower, more requests."),
+    basic: bool = typer.Option(False, "--basic", help="Quick scan: repo list + README summaries, no AI (the default)."),
+    max_repos: int = typer.Option(12, "--max-repos", "-n", help="Look at this many repos (most starred, then newest)."),
+    forks: bool = typer.Option(False, "--forks", help="Include repos you forked."),
+    no_ai: bool = typer.Option(False, "--no-ai", help="With --deep: skip the AI bullets."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Add the suggested repos without asking."),
+) -> None:
+    """Add projects (and skills) to your master resume from your public GitHub repos."""
+    from .resume import github as gh
+
+    if deep and basic:
+        _fail("Pick one of --basic or --deep.")
+    if profile is None:
+        profile = questionary.text("Paste your GitHub profile link (e.g. https://github.com/yourname):").ask()
+        if not profile:
+            raise typer.Exit(0)
+    try:
+        username = gh.parse_username(profile)
+    except gh.GitHubError as e:
+        _fail(str(e))
+    try:
+        r = store.load()
+    except FileNotFoundError:
+        r = MasterResume()
+        console.print("[dim]No master resume yet; starting one with your GitHub projects.[/dim]")
+
+    try:
+        with console.status(f"{'Deep' if deep else 'Basic'} scan of github.com/{username}…") as status:
+            result = gh.scan(username, deep=deep, max_repos=max_repos, include_forks=forks,
+                             progress=lambda m: status.update(m))
+    except gh.GitHubError as e:
+        _fail(str(e))
+    if not result.repos:
+        _fail(f"github.com/{result.username} has no public repos of its own"
+              + (f" ({result.skipped_forks} forks skipped; add --forks to include them)." if result.skipped_forks else "."))
+
+    t = Table(title=f"github.com/{esc(result.username)} · {len(result.repos)} of {result.total_public} public repos"
+              + (" · deep scan" if deep else ""), title_justify="left", expand=True)
+    t.add_column("#", justify="right", style="cyan")
+    t.add_column("Repo", no_wrap=True)
+    t.add_column("★", justify="right")
+    t.add_column("Tech" if deep else "Language")
+    t.add_column("From the README / description", ratio=3)
+    for i, repo in enumerate(result.repos, 1):
+        tech = ", ".join(dict.fromkeys(repo.languages + repo.tech)) if deep else (repo.language or "")
+        note = esc(repo.summary or "") or "[dim](no README summary or description)[/dim]"
+        if gh.already_in(r, repo):
+            note = "[dim]already in your resume[/dim]"
+        t.add_row(str(i), esc(repo.name) + (" [dim](archived)[/dim]" if repo.archived else ""),
+                  str(repo.stars), esc(tech), note)
+    console.print(t)
+    if result.skipped_forks:
+        console.print(f"[dim]{result.skipped_forks} forked repo(s) skipped (--forks to include).[/dim]")
+
+    fresh = [repo for repo in result.repos if not gh.already_in(r, repo)]
+    if not fresh:
+        console.print("Every repo found is already in your resume's projects.")
+        return
+    suggested = [repo for repo in fresh if repo.summary][:6]
+    if yes:
+        chosen = suggested
+    else:
+        chosen = questionary.checkbox(
+            "Which repos should become projects on your resume? (space to toggle, enter to confirm)",
+            choices=[questionary.Choice(f"{repo.name} — {(repo.summary or 'no summary')[:70]}", value=repo,
+                                        checked=repo in suggested) for repo in fresh],
+        ).ask()
+    if not chosen:
+        console.print("Nothing added.")
+        return
+
+    bullets: dict[str, list[str]] = {}
+    if deep and not no_ai:
+        llm = LLM()
+        for repo in chosen:
+            try:
+                with console.status(f"Writing bullets for {esc(repo.name)} with {backend_label()}…"):
+                    kept, rejected = gh.ai_bullets(repo, llm)
+            except LLMError as e:
+                console.print(f"[yellow]AI bullets for {esc(repo.name)} failed ({esc(str(e))}); "
+                              "using the README's feature list.[/yellow]")
+                continue
+            bullets[repo.full_name] = kept or (repo.readme.features if repo.readme else [])
+            for b, why in rejected:
+                console.print(f"[dim]Dropped a bullet for {esc(repo.name)} ({esc(why)}): {esc(b)}[/dim]")
+
+    projects = [gh.to_project(repo, bullets.get(repo.full_name)) for repo in chosen]
+    for p in projects:
+        console.print(f"[bold]{esc(p.name)}[/bold]  [dim]{esc(p.url or '')}[/dim]")
+        if p.description:
+            console.print(f"  {esc(p.description)}")
+        for b in p.bullets:
+            console.print(f"  • {esc(b.text)}")
+        if not p.description and not p.bullets:
+            console.print("  [dim](nothing to say from the README; add a line with `resume edit projects`)[/dim]")
+    extra = gh.new_skills(r, chosen)
+    if extra:
+        console.print("Skills these repos use that your resume doesn't list: "
+                      + "; ".join(f"{k}: {', '.join(v)}" for k, v in extra.items()))
+    if not yes and not questionary.confirm(f"Add {len(projects)} project(s) to your master resume?", default=True).ask():
+        console.print("Nothing saved.")
+        return
+    r.projects += projects
+    if extra and (yes or questionary.confirm("Add those skills too?", default=True).ask()):
+        gh.add_skills(r, extra)
+    if gh.add_github_link(r, result.profile_url):
+        console.print(f"[dim]Added your GitHub link ({esc(result.profile_url)}) to your contact details.[/dim]")
+    store.assign_ids(r)
+    _save_master(r)
+    if not deep:
+        console.print("[dim]Tip: `resume github <link> --deep` also reads each repo's dependencies and "
+                      "drafts bullets from the README.[/dim]")
+    console.print("[dim]Review and polish them with `resume edit projects`.[/dim]")
+
+
 TRANSCRIPT_TYPES = {".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg"}
 
 
@@ -350,3 +442,11 @@ cli_jobs.register(app)
 from . import cli_apply  # noqa: E402
 
 cli_apply.register(app)
+
+from . import cli_queue  # noqa: E402
+
+cli_queue.register(app)
+
+from . import cli_ai  # noqa: E402
+
+cli_ai.register(app)

@@ -20,7 +20,9 @@ uv sync
 uv run autoapply init
 ```
 
-**AI backend** (chosen during `init`, stored as `llm_backend` in `~/.autoapply/config.yaml`):
+**AI provider.** `init` asks which one to use; change it any time with `autoapply ai`, which lists
+all three, shows whether each is set up, and lets you switch (or `ai use claude-code|api|ollama
+[--model NAME]` without the menu). It's stored as `llm_backend` in `~/.autoapply/config.yaml`:
 - `claude-code` (default): uses your Claude Pro/Max subscription through Claude Code's
   headless mode (`claude -p`). Install Claude Code and run `claude` once to log in. Calls count
   toward your normal subscription usage limits. Personal use only.
@@ -28,7 +30,7 @@ uv run autoapply init
   ever share the tool with other people.
 - `ollama`: a model running locally in [Ollama](https://ollama.com): free and nothing leaves your
   machine, but slower and less capable than Claude. `ollama pull qwen3:14b` (or any model), then
-  `set BACKEND ollama` and `set OLLAMA_MODEL qwen3:14b` in the console. Tailoring, essays, resume
+  `ai use ollama --model qwen3:14b`. Tailoring, essays, resume
   import and suggestions all use it, with the same fact guards (a rewrite that adds numbers or terms
   not in your master resume is still rejected). Settings: `OLLAMA_HOST` (default `$OLLAMA_HOST` or
   `localhost:11434`), `OLLAMA_CTX` (context window, default 16384; raise it for long postings if
@@ -125,6 +127,31 @@ outlined in orange.
 | `answers setup` | Answer the usual questions up front (work auth, sponsorship, EEO, how you heard…) |
 | `answers list` / `answers set <key> <value>` / `answers forget <key or #>` | Manage saved answers |
 
+### Apply queue
+
+Apply to a whole list of matches one after another:
+
+```
+autoapply > search
+autoapply > queue build          # asks: which jobs (last search / shortlist / all) and which order
+autoapply > queue run
+```
+
+`queue build --from last|saved|all --order match|recent` skips the questions. `match` puts the best
+resume match first; `recent` puts the most recently posted first. Optional `--min-match 60` and
+`--limit 20`; the same role posted in several cities is queued once, and jobs you've applied to,
+ignored, or that closed are left out. `queue run` takes each job in turn: apply now, read the
+description, skip for now, remove, ignore, or stop. Every form still opens in the browser for you to
+review and submit; applied jobs leave the queue, everything else stays for next time. Jobs on sites
+AutoApply can't fill are opened in your browser, and you're asked whether you applied.
+
+| Command | What it does |
+|---|---|
+| `queue` / `queue show` | The queue, in order |
+| `queue order match\|recent` | Re-sort it |
+| `queue add <id…>` / `queue remove <id…>` / `queue clear` | Change what's in it |
+| `queue run [--max N] [--no-tailor] [--no-ai]` | Work through it |
+
 First time only: `uv run playwright install chromium` (downloads the browser, ~125 MB).
 **Tailored resumes.** Before filling a form, Claude picks and orders the experience, projects,
 bullets and skills from your master resume that fit the job, and may reword bullets and the
@@ -143,12 +170,22 @@ Browser sign-ins persist in `~/.autoapply/browser`.
 | `autoapply resume build` | Step-by-step wizard (with optional AI bullet suggestions) |
 | `autoapply resume edit [section]` | Menu editor: add/edit/reorder/delete items and bullets |
 | `autoapply resume show` | Print it with problems highlighted |
+| `autoapply resume github <profile link>` | Add projects from your public repos (see below) |
 | `autoapply resume transcript file.pdf` | Save a transcript; it's uploaded when a form asks for one |
 | `autoapply resume validate` | Check after hand-editing the YAML |
 | `autoapply usage` | Token usage per task |
 
 Every item gets a stable id (`exp2`, `exp2.b3`, …). Tailoring selects items by id, so
 it can't invent experience you don't have. Put *more* in the master than fits on a page.
+
+**Projects from GitHub.** `resume github https://github.com/you` lists your public repos (most
+starred first, forks skipped unless `--forks`), takes a summary and any "Features" list from each
+README, and lets you tick which ones become projects. It can also add your GitHub link and any
+languages your skills section is missing. The default (`--basic`) is quick: one request per repo, no AI.
+`--deep` also reads each repo's language breakdown and dependency files (package.json, pyproject.toml,
+Cargo.toml, go.mod…) to name the frameworks used, and has the AI write 2-3 bullets from the README;
+any bullet with a number or name that isn't in the repo's own text is dropped (`--no-ai` skips the
+bullets). Anonymous GitHub access allows 60 requests an hour; set `GITHUB_TOKEN` for more.
 
 Data lives in `~/.autoapply` (override with `AUTOAPPLY_HOME`).
 

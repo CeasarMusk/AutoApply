@@ -18,6 +18,7 @@ from sqlmodel import col, func, select
 from . import config, db, sources
 from .jobs import details, presets
 from .jobs import profile as profile_mod
+from .jobs import queue as queue_mod
 from .jobs.rank import score
 from .jobs.search import Filters, matches, store
 from .models import Job
@@ -250,6 +251,7 @@ def run_search(f: Filters, label: str) -> None:
         rows = sorted(rows, key=_sort_key, reverse=True)
         new_ids = {j.id for j in result.new}
         arranged = arrange([_row(j, new=j.id in new_ids) for j in rows])
+        queue_mod.remember_results([j.id for j in rows], label)
         table_rows = arranged[:30]
 
     for key, err in report.errors.items():
@@ -268,6 +270,7 @@ def run_search(f: Filters, label: str) -> None:
     console.print(_table(table_rows, "Best matches" if prof else "Matches", show_skills=bool(prof)))
     if len(arranged) > 30:
         console.print(f"[dim]…{len(arranged) - 30} more: `jobs`[/dim]")
+    console.print("[dim]`queue build` lines these up to apply to one after another, best match or newest first.[/dim]")
     console.print("[dim]`use <id>` then `info` / `open` / `save`. Remote OK listings are credited to remoteok.com; "
                   "internship / new-grad listings via Keryx (github.com/GodlyDonuts/keryx).[/dim]")
     if not prof:

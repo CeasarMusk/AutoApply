@@ -114,6 +114,7 @@ class Config(BaseModel):
     tailor_resume: bool = True  # upload a resume tailored to each job (falls back to resume_file)
     ai_essays: bool = True  # draft answers to required open-ended questions with AI
     ask_optional: bool = True  # ask about optional questions it can't answer (False: leave them blank)
+    queue_order: Literal["match", "recent"] = "match"  # apply queue: best match or most recently posted first
 
 
 def keep_document(src: Path, stem: str) -> Path:

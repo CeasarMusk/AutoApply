@@ -48,6 +48,7 @@ BANNER = r"""
 TIPS = [
     "Type `search` and pick ★ Jobs like my resume.",
     "`use 12` then `apply`: the form gets filled, you review and click Submit.",
+    "`queue build` then `queue run` applies to your search results one after another, best match or newest first.",
     "`answers setup` answers the usual work-authorization and EEO questions once, up front.",
     "`search --last` repeats your last search without the menu.",
     "`use 12` selects job 12, then `info`, `open`, `save` act on it.",
@@ -55,7 +56,7 @@ TIPS = [
     "`profile` shows what AutoApply thinks you're looking for, based on your resume.",
     "Press Tab to complete commands, and ↑ to search your command history.",
     "Internships and new-grad roles from Keryx are searched offline; `keryx sync` grabs the latest list.",
-    "`set BACKEND ollama` runs tailoring and essays on a local model, free and private.",
+    "`ai` shows the AI providers (Claude subscription, Claude API key, local Ollama) and switches between them.",
     "`companies add <careers link>` works for Workday, Oracle, SmartRecruiters, Workable and BambooHR boards.",
 ]
 
@@ -68,7 +69,7 @@ OPTIONS: dict[str, tuple[str, str, str]] = {
     "KERYX_MAX": ("keryx_live_max_boards", "int", "Most boards checked live per search"),
     "KERYX_SYNC": ("keryx_sync_hours", "float", "Re-download the Keryx list when older than this many hours (0: manual)"),
     "CACHE": ("board_cache_minutes", "float", "Reuse a board's listing fetched within this many minutes"),
-    "BACKEND": ("llm_backend", "choice:claude-code,api,ollama", "AI backend: claude-code (subscription), api, or ollama (local)"),
+    "BACKEND": ("llm_backend", "choice:claude-code,api,ollama", "AI provider: claude-code (Claude subscription), api (Claude API key), ollama (local). See `ai`"),
     "MODEL": ("claude_code_model", "str", "Claude Code model alias (opus, sonnet, haiku)"),
     "OLLAMA_MODEL": ("ollama_model", "str", "Ollama model, e.g. qwen3:14b (empty: first installed)"),
     "OLLAMA_HOST": ("ollama_host", "str", "Ollama server URL (empty: $OLLAMA_HOST or localhost:11434)"),
@@ -106,6 +107,13 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
         ("open [id]", "Open the posting in your browser"),
         ("save | ignore | reset [id]", "Shortlist / hide / clear"),
     ]),
+    ("Apply queue", [
+        ("queue build [--from last|saved|all] [--order match|recent]", "Queue the matching jobs to apply to one after another"),
+        ("queue / queue show", "See what's queued, in order"),
+        ("queue run", "Apply to each in turn: you review and submit every form"),
+        ("queue order match|recent", "Best match first, or most recently posted first"),
+        ("queue add | remove [id…] / queue clear", "Change what's queued"),
+    ]),
     ("Answers", [
         ("answers setup", "Answer the common questions up front (work auth, EEO…)"),
         ("answers list | set <key> <value> | forget <key|#>", "See / change saved answers"),
@@ -113,11 +121,13 @@ HELP: list[tuple[str, list[tuple[str, str]]]] = [
     ("Resume", [
         ("resume import <file.pdf>", "Turn your resume PDF into the master resume"),
         ("resume show", "View the master resume"),
+        ("resume github <profile link> [--deep]", "Add projects from your GitHub repos (READMEs; --deep: dependencies + AI bullets)"),
         ("resume transcript <file.pdf>", "Save your transcript for forms that ask for one"),
     ]),
     ("More", [
         ("companies add <slug|board link…> | list | remove", "Extra companies beyond the built-in list"),
         ("keryx status | sync", "Offline internship / new-grad list: freshness, update now"),
+        ("ai / ai use claude-code|api|ollama [-m model]", "Pick the AI provider: Claude subscription, Claude API key, or local Ollama"),
         ("set <OPTION> <value> | unset | show options", "Settings: KERYX, KERYX_LIVE, BACKEND, OLLAMA_MODEL, TAILOR…"),
         ("usage", "AI token usage"),
         ("banner, history, clear, help <command>, exit", ""),
@@ -221,6 +231,8 @@ class Shell:
             argv = JOB_SHORTCUTS[cmd] + self._with_job_id(args)
         elif cmd == "job" and args and args[0] in ("show", "open", "save", "ignore", "reset"):
             argv = ["job", args[0]] + self._with_job_id(args[1:])
+        elif cmd == "queue" and args and args[0] in ("add", "remove"):
+            argv = ["queue", args[0]] + self._with_job_id(args[1:])
         self.dispatch(argv)
         if self.current_job is not None:
             self._refresh_job()
@@ -284,7 +296,7 @@ class Shell:
             f"       =[ [bold]autoapply v{VERSION}[/bold]",
             f"+ -- --=[ resume: {resume}",
             f"+ -- --=[ {n_companies} job boards{' + Keryx offline list' if cfg.use_keryx else ''} · {total} jobs saved · [green]{new} new[/green] · [yellow]{saved} shortlisted[/yellow]",
-            f"+ -- --=[ AI: {ai}",
+            f"+ -- --=[ AI: {ai} [dim]· `ai` to switch provider[/dim]",
         ]
         for l in lines:
             console.print(l, highlight=False)

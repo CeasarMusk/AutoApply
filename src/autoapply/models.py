@@ -150,6 +150,15 @@ class Application(SQLModel, table=True):
     updated_at: datetime = SQLField(default_factory=_now)
 
 
+class QueueItem(SQLModel, table=True):
+    """A job waiting in the apply queue. `queue run` walks these in `position` order."""
+
+    id: int | None = SQLField(default=None, primary_key=True)
+    job_id: int = SQLField(foreign_key="job.id", index=True, unique=True)
+    position: int = 0
+    added_at: datetime = SQLField(default_factory=_now)
+
+
 class LLMUsage(SQLModel, table=True):
     id: int | None = SQLField(default=None, primary_key=True)
     task: str

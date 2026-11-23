@@ -494,7 +494,7 @@ def run(job: Job, resume: MasterResume | None, resume_file: Path, *, headless: b
                 pass
 
 
-def record(job: Job, result: Result, resume_file: Path) -> None:
+def record(job: Job, result: Result, resume_file: Path | None) -> None:
     if not result.submitted:
         return
     now = datetime.now(timezone.utc)
@@ -503,6 +503,6 @@ def record(job: Job, result: Result, resume_file: Path) -> None:
         if j:
             j.status = "applied"
             s.add(j)
-        s.add(Application(job_id=job.id, status="applied", resume_path=str(resume_file),
+        s.add(Application(job_id=job.id, status="applied", resume_path=str(resume_file) if resume_file else None,
                           notes=f"Applied via AutoApply at {result.url}", created_at=now, updated_at=now))
         s.commit()

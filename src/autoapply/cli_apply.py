@@ -198,16 +198,33 @@ def apply(
         job = s.get(Job, job_id)
     if job is None:
         _fail(f"No job with id {job_id}.")
+    if job.status == "applied" and not dry_run and job.source in runner.SUPPORTED and not questionary.confirm(
+            "You already applied to this one. Open it anyway?", default=False).ask():
+        return
+    outcome = apply_one(job, dry_run=dry_run, no_ai=no_ai, no_tailor=no_tailor, headless=headless)
+    if outcome.startswith("error:"):
+        _fail(outcome.removeprefix("error:"))
+
+
+def mark_applied_externally(job: Job) -> None:
+    """Record an application the user made on a site AutoApply can't fill."""
+    runner.record(job, runner.Result(url=job.apply_url or job.url, submitted=True), None)
+
+
+def apply_one(job: Job, *, dry_run: bool = False, no_ai: bool = False, no_tailor: bool = False,
+              headless: bool = False, ask_external: bool = False) -> str:
+    """Fill one application. Returns "applied", "not_submitted", "external", "dry_run" or "error:<why>"."""
     if job.source not in runner.SUPPORTED:
         console.print(f"[yellow]{esc(job.company)}'s posting is on an external site AutoApply can't fill yet. "
                       f"Opening it so you can apply there.[/yellow]")
         import webbrowser
 
         webbrowser.open(job.apply_url or job.url)
-        return
-    if job.status == "applied" and not dry_run and not questionary.confirm(
-            "You already applied to this one. Open it anyway?", default=False).ask():
-        return
+        if ask_external and runner.ask(questionary.confirm("Did you submit an application there?", default=False)):
+            mark_applied_externally(job)
+            console.print(f"[green]✓ Marked as applied.[/green] {esc(job.title)} @ {esc(job.company)}")
+            return "applied"
+        return "external"
     cfg = config.load_config()
     try:
         resume = resume_store.load()
@@ -227,18 +244,19 @@ def apply(
                             use_ai=cfg.ai_essays and not no_ai, screenshot=shot,
                             transcript_file=runner.saved_transcript(cfg), ask_optional=cfg.ask_optional)
     except Exception as e:
-        msg = str(e).splitlines()[0]
+        msg = str(e).splitlines()[0] if str(e) else type(e).__name__
         if "Executable doesn't exist" in msg or "playwright install" in msg:
-            _fail("The browser isn't installed yet. Run: uv run playwright install chromium")
-        _fail(f"Couldn't run the application: {msg}")
+            return "error:The browser isn't installed yet. Run: uv run playwright install chromium"
+        return f"error:Couldn't run the application: {msg}"
     if dry_run:
         console.print(f"[dim]Dry run: nothing was submitted. Screenshot: {shot}[/dim]")
-        return
+        return "dry_run"
     runner.record(job, result, resume_file)
     if result.submitted:
         console.print(f"[green]✓ Marked as applied.[/green] {esc(job.title)} @ {esc(job.company)}")
-    else:
-        console.print("Not marked as applied.")
+        return "applied"
+    console.print("Not marked as applied.")
+    return "not_submitted"
 
 
 # ---------------------------------------------------------------------------
